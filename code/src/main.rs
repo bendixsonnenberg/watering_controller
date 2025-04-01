@@ -77,10 +77,10 @@ async fn main(_spawner: Spawner) {
         embassy_embedded_hal::shared_bus::blocking::spi::SpiDevice::new(&spi_bus, sd_control_pin);
 
     // setup sd card
-    let mut sd_card = SdCard::new(spi_dev, embassy_time::Delay);
+    let sd_card = SdCard::new(spi_dev, embassy_time::Delay);
 
     // need time source, maybe write self, just return zero always
-    let mut vol = VolumeManager::new(sd_card, dummyTimeSource::dummy());
+    let vol = VolumeManager::new(sd_card, dummyTimeSource::dummy());
 }
 
 #[embassy_executor::task]
