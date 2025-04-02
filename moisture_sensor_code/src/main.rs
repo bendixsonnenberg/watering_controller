@@ -108,7 +108,7 @@ async fn write_to_sd(resources: SdCardResources) {
                 // file was successfully opened, otherwise this will have failed
                 loop {
                     let write_res = file.write(b"how are you\n");
-                    if let Err(_) = write_res {
+                    if write_res.is_err() {
                         info!("writing to sd card failed");
                     }
                     Timer::after_secs(10).await;
