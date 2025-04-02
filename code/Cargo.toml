@@ -19,7 +19,8 @@ heapless = { version = "0.8", default-features = false }
 assign-resources = "0.4.1"
 embassy-embedded-hal = "0.3.0"
 static_cell = "2.1.0"
-embedded-sdmmc = "0.8.1"
+embedded-sdmmc = {version = "0.8.1", features = ["defmt-log"], default-features = false}
+embedded-hal-bus = "0.3.0"
 [profile.dev]
 opt-level = "s"
 [profile.release]
