@@ -21,6 +21,7 @@ embassy-embedded-hal = "0.3.0"
 static_cell = "2.1.0"
 embedded-sdmmc = {version = "0.8.1", features = ["defmt-log"], default-features = false}
 embedded-hal-bus = "0.3.0"
+byteorder = {version = "1.5.0", default-features = false}
 [profile.dev]
 opt-level = "s"
 [profile.release]
