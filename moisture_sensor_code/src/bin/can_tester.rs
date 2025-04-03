@@ -6,7 +6,7 @@ use byteorder::{ByteOrder, LE};
 use defmt::*;
 use embassy_executor::Spawner;
 use embassy_stm32::bind_interrupts;
-use embassy_stm32::can::filter::{self, BankConfig};
+use embassy_stm32::can::filter::{self};
 use embassy_stm32::can::frame::Header;
 use embassy_stm32::can::{
     Frame, Id, Rx0InterruptHandler, Rx1InterruptHandler, SceInterruptHandler, StandardId,
@@ -61,7 +61,7 @@ fn create_frame(target: u16, command: u16, remote: bool, data: u16) -> Frame {
     let id = StandardId::new(id).unwrap();
     let id = Id::Standard(id);
     let header = Header::new(id, 2, remote);
-    let mut buf = &mut [0, 0];
+    let buf = &mut [0, 0];
     LE::write_u16(buf, data);
     Frame::new(header, buf).unwrap()
 }

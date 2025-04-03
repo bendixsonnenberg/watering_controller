@@ -10,7 +10,7 @@ use assign_resources::assign_resources;
 use byteorder::ByteOrder;
 use can::{
     filter::{self, Mask16},
-    Can, Frame, StandardId,
+    Can, StandardId,
 };
 use defmt::*;
 use embassy_executor::Spawner;
@@ -20,7 +20,7 @@ use embassy_time::{Instant, Timer};
 use embedded_sdmmc::{self, SdCard, VolumeIdx, VolumeManager};
 use gpio::{Level, Output, Speed};
 
-use time_source::dummyTimeSource;
+use time_source::DummyTimeSource;
 use {defmt_rtt as _, panic_probe as _};
 mod time_source;
 // define constants
@@ -113,7 +113,7 @@ async fn write_to_sd(resources: SdCardResources) {
     config.frequency = time::mhz(16);
 
     // need time source, maybe write self, just return zero always
-    let mut vol = VolumeManager::new(sd_card, dummyTimeSource::dummy());
+    let mut vol = VolumeManager::new(sd_card, DummyTimeSource::dummy());
 
     // always select the first volume on the card, sacrificing a 8gb sd card is not something that
     // has to be avoided. We assume this sd card is dedicated to this task.
@@ -187,7 +187,7 @@ async fn handle_valve(resources: ValveResources) {
 
 #[embassy_executor::task]
 async fn handle_modify_threshold(resources: SettingResources, can_resources: CanResources) {
-    let mut adc = adc::Adc::new(resources.adc);
+    let adc = adc::Adc::new(resources.adc);
     unsafe {
         // adc needs a hack in embassy to work. See embassy issue #2162
         interrupt::ADC1_2.enable();
@@ -271,7 +271,7 @@ async fn handle_modify_threshold(resources: SettingResources, can_resources: Can
     }
 }
 async fn send_data_over_can(can: &mut Can<'_>, data: u16, command: u16) {
-    let mut buf = &mut [0, 0];
+    let buf = &mut [0, 0];
     byteorder::LE::write_u16(buf, data);
     let frame =
         can::frame::Frame::new(create_header_from_command_device_id(command, 0), buf).unwrap();
