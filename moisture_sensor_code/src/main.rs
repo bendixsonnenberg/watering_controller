@@ -17,7 +17,8 @@ use embassy_executor::Spawner;
 use embassy_stm32::interrupt::InterruptExt;
 use embassy_stm32::*;
 use embassy_time::{Instant, Timer};
-use embedded_sdmmc::{self, SdCard, VolumeIdx, VolumeManager};
+use embedded_hal_bus::spi::ExclusiveDevice;
+use embedded_sdmmc::{self, sdcard::AcquireOpts, SdCard, VolumeIdx, VolumeManager};
 use gpio::{Level, Output, Speed};
 
 use time_source::DummyTimeSource;
@@ -75,12 +76,12 @@ async fn main(_spawner: Spawner) {
     let r = split_resources!(p);
 
     // setup relay
-    _spawner.spawn(handle_valve(r.valve_control)).unwrap();
-    _spawner
-        .spawn(handle_modify_threshold(r.level_setting, r.can_control))
-        .unwrap();
+    //_spawner.spawn(handle_valve(r.valve_control)).unwrap();
+    //_spawner
+    //    .spawn(handle_modify_threshold(r.level_setting, r.can_control))
+    //    .unwrap();
 
-    //_spawner.spawn(write_to_sd(r.sd_card)).unwrap();
+    _spawner.spawn(write_to_sd(r.sd_card)).unwrap();
     // sd cards can be addressed by spi.
     // there is a crate to hande the file system stuff, but it needs a embedded_hal abstraction,
     // therefore we use embassy_embedded_hal to adapt between them.
@@ -99,25 +100,26 @@ async fn write_to_sd(resources: SdCardResources) {
         resources.miso,
         config,
     );
-    let spi_bus = RefCell::new(spi);
-    let spi_bus: embassy_sync::blocking_mutex::Mutex<
-        embassy_sync::blocking_mutex::raw::NoopRawMutex,
-        _,
-    > = embassy_sync::blocking_mutex::Mutex::new(spi_bus);
-    let sd_control_pin = Output::new(resources.ss, Level::High, Speed::Medium);
-    let spi_dev =
-        embassy_embedded_hal::shared_bus::blocking::spi::SpiDevice::new(&spi_bus, sd_control_pin);
+    let sd_control_pin = Output::new(resources.ss, Level::High, Speed::Low);
+    let spi_dev = ExclusiveDevice::new_no_delay(spi, sd_control_pin).unwrap();
 
+    let aquire_options = AcquireOpts {
+        acquire_retries: 5,
+        use_crc: true,
+    };
     // setup sd card
-    let sd_card = SdCard::new(spi_dev, embassy_time::Delay);
-    config.frequency = time::mhz(16);
+    info!("Using {} hz", embassy_time::TICK_HZ);
+    let sd_card = SdCard::new_with_options(spi_dev, embassy_time::Delay, aquire_options);
+    info!("card size is:  {}", sd_card.num_bytes().unwrap());
 
     // need time source, maybe write self, just return zero always
     let mut vol = VolumeManager::new(sd_card, DummyTimeSource::dummy());
 
     // always select the first volume on the card, sacrificing a 8gb sd card is not something that
     // has to be avoided. We assume this sd card is dedicated to this task.
-    if let Ok(mut vol0) = vol.open_volume(VolumeIdx(0)) {
+    let volume = vol.open_volume(VolumeIdx(0));
+    info!("{:?}", volume);
+    if let Ok(mut vol0) = volume {
         if let Ok(mut root_dir) = vol0.open_root_dir() {
             if let Ok(mut file) =
                 root_dir.open_file_in_dir("log_file.csv", embedded_sdmmc::Mode::ReadWriteTruncate)
@@ -130,8 +132,14 @@ async fn write_to_sd(resources: SdCardResources) {
                     }
                     Timer::after_secs(10).await;
                 }
+            } else {
+                info!("failed opening file");
             }
+        } else {
+            info!("Failed opening root_dir");
         }
+    } else {
+        info!("Failed opening volume");
     };
     info!("Opening sd card failed");
     let mut i = 0;
