@@ -105,7 +105,7 @@ async fn write_to_sd(resources: SdCardResources) {
 
     let aquire_options = AcquireOpts {
         acquire_retries: 5,
-        use_crc: true,
+        use_crc: false,
     };
     // setup sd card
     info!("Using {} hz", embassy_time::TICK_HZ);
@@ -121,15 +121,21 @@ async fn write_to_sd(resources: SdCardResources) {
     info!("{:?}", volume);
     if let Ok(mut vol0) = volume {
         if let Ok(mut root_dir) = vol0.open_root_dir() {
-            if let Ok(mut file) =
-                root_dir.open_file_in_dir("log_file.csv", embedded_sdmmc::Mode::ReadWriteTruncate)
-            {
+            let file = root_dir.open_file_in_dir(
+                "log_file.csv",
+                embedded_sdmmc::Mode::ReadWriteCreateOrTruncate,
+            );
+            info!("{:?}", file);
+            if let Ok(mut file) = file {
                 // file was successfully opened, otherwise this will have failed
                 loop {
                     let write_res = file.write(b"how are you\n");
+                    info!("{:?}", write_res);
                     if write_res.is_err() {
                         info!("writing to sd card failed");
                     }
+
+                    file.flush();
                     Timer::after_secs(10).await;
                 }
             } else {
