@@ -26,5 +26,5 @@ dummy-pin = "1.0.0"
 [profile.dev]
 opt-level = "s"
 [profile.release]
-debug = 2
+debug = true 
 op-level = "s"

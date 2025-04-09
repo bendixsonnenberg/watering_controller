@@ -76,12 +76,12 @@ async fn main(_spawner: Spawner) {
     let r = split_resources!(p);
 
     // setup relay
-    //_spawner.spawn(handle_valve(r.valve_control)).unwrap();
-    //_spawner
-    //    .spawn(handle_modify_threshold(r.level_setting, r.can_control))
-    //    .unwrap();
+    _spawner.spawn(handle_valve(r.valve_control)).unwrap();
+    _spawner
+        .spawn(handle_modify_threshold(r.level_setting, r.can_control))
+        .unwrap();
 
-    _spawner.spawn(write_to_sd(r.sd_card)).unwrap();
+    // _spawner.spawn(write_to_sd(r.sd_card)).unwrap();
     // sd cards can be addressed by spi.
     // there is a crate to hande the file system stuff, but it needs a embedded_hal abstraction,
     // therefore we use embassy_embedded_hal to adapt between them.
@@ -128,14 +128,30 @@ async fn write_to_sd(resources: SdCardResources) {
             info!("{:?}", file);
             if let Ok(mut file) = file {
                 // file was successfully opened, otherwise this will have failed
+                //
+                // writing formatting line!()
+                // let _ = file.write(b"s, m, t, h\n");
                 loop {
-                    let write_res = file.write(b"how are you\n");
-                    info!("{:?}", write_res);
-                    if write_res.is_err() {
-                        info!("writing to sd card failed");
-                    }
-
-                    file.flush();
+                    // let mut buffer: String<32> = String::new();
+                    //
+                    // let fmt_res = core::write!(
+                    //     &mut buffer,
+                    //     "{}, {}, {}, {}",
+                    //     Instant::now().as_secs(),
+                    //     SHARED.moisture.load(Ordering::Relaxed),
+                    //     SHARED.threshold.load(Ordering::Relaxed),
+                    //     SHARED.hysterese.load(Ordering::Relaxed)
+                    // );
+                    // let write_res = file.write(buffer.as_bytes());
+                    // let flush_res = file.flush();
+                    // if fmt_res.is_err() || write_res.is_err() || flush_res.is_err() {
+                    //     info!(
+                    //         "Writing to sd card failed, fmt: {:?}, write: {:?}, flush: {:?}",
+                    //         fmt_res.is_err(),
+                    //         write_res.is_err(),
+                    //         flush_res.is_err()
+                    //     );
+                    // }
                     Timer::after_secs(10).await;
                 }
             } else {
@@ -201,7 +217,6 @@ async fn handle_valve(resources: ValveResources) {
 
 #[embassy_executor::task]
 async fn handle_modify_threshold(resources: SettingResources, can_resources: CanResources) {
-    let adc = adc::Adc::new(resources.adc);
     unsafe {
         // adc needs a hack in embassy to work. See embassy issue #2162
         interrupt::ADC1_2.enable();
@@ -221,7 +236,7 @@ async fn handle_modify_threshold(resources: SettingResources, can_resources: Can
     info!("sent dummy message");
     loop {
         let res = can.read().await;
-        info!("got frame: {:?}", res);
+        trace!("got frame: {:?}", res);
         if let Ok(env) = res {
             let frame = env.frame;
             info!("frame received: {:?}", env);
