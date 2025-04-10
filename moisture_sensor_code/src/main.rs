@@ -26,7 +26,7 @@ use {defmt_rtt as _, panic_probe as _};
 mod time_source;
 // define constants
 const LOG_INTERVAL: u64 = 5; // at n*LOG_INTERVAL seconds a log entry is written
-const CAN_BITRATE: u32 = 500_000; // bitrate for can bus. We are not transfering large amounts of
+const CAN_BITRATE: u32 = 125_000; // bitrate for can bus. We are not transfering large amounts of
                                   // data ,so lets keep this low
 const ID_MASK: u16 = 0b000_1111_1111; // maks for can, masks out the order type
 assign_resources! {
@@ -77,9 +77,9 @@ async fn main(_spawner: Spawner) {
 
     // setup relay
     _spawner.spawn(handle_valve(r.valve_control)).unwrap();
-    _spawner
-        .spawn(handle_modify_threshold(r.level_setting, r.can_control))
-        .unwrap();
+    // _spawner
+    //     .spawn(handle_modify_threshold(r.level_setting, r.can_control))
+    //     .unwrap();
 
     // _spawner.spawn(write_to_sd(r.sd_card)).unwrap();
     // sd cards can be addressed by spi.
@@ -181,7 +181,7 @@ async fn write_to_sd(resources: SdCardResources) {
 async fn handle_valve(resources: ValveResources) {
     let mut adc = adc::Adc::new(resources.adc);
     let mut moisture_level_pin = resources.moisture_pin;
-    let mut valve_pin = Output::new(resources.valve_pin, Level::High, Speed::Low);
+    let mut valve_pin = Output::new(resources.valve_pin, Level::Low, Speed::Low);
     let mut vrefint = adc.enable_vref();
     unsafe {
         // adc needs a hack in embassy to work. See embassy issue #2162
@@ -190,25 +190,28 @@ async fn handle_valve(resources: ValveResources) {
     let vref_sample = adc.read(&mut vrefint).await;
     info!("vref_sample: {}", vref_sample);
 
-    let value_dry = 2800;
-    let value_wet = 1200;
+    let value_dry = 2400;
+    let value_wet = 2200;
     let threshold = (value_dry - value_wet) / 2 + value_wet;
     SHARED.threshold.store(threshold, Ordering::Relaxed);
-    let hystere = 100;
+    let hystere = 20;
     loop {
         //info!("starting loop");
         let v = adc.read(&mut moisture_level_pin).await;
 
         SHARED.moisture.store(v, Ordering::Relaxed);
-        //info!("Sample: {}", v);
+        info!("Sample: {}", v);
 
         let threshold = SHARED.threshold.load(Ordering::Relaxed);
-        if v < threshold - hystere {
+        if v > threshold - hystere {
             // wet condition, set to fill put water, then wait for 2min before trying to water
             // again
+            info!("watering now");
             valve_pin.set_high();
-        } else if v > threshold + hystere {
+            Timer::after_secs(30).await;
             valve_pin.set_low();
+            info!("waiting for backoff");
+            Timer::after_secs(15 * 60).await;
         }
         Timer::after_millis(100).await;
         //info!("Timer Done");
@@ -236,7 +239,7 @@ async fn handle_modify_threshold(resources: SettingResources, can_resources: Can
     info!("sent dummy message");
     loop {
         let res = can.read().await;
-        trace!("got frame: {:?}", res);
+        info!("got frame: {:?}", res);
         if let Ok(env) = res {
             let frame = env.frame;
             info!("frame received: {:?}", env);
