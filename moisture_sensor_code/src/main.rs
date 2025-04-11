@@ -220,18 +220,6 @@ async fn handle_valve(resources: ValveResources) {
 
 #[embassy_executor::task]
 async fn handle_modify_threshold(resources: SettingResources, can_resources: CanResources) {
-    unsafe {
-        // adc needs a hack in embassy to work. See embassy issue #2162
-        interrupt::ADC1_2.enable();
-    }
-    //let mut read_pin = resources.measure_pin;
-    //   loop {
-    //   Timer::after_secs(5).await;
-    //    let v = adc.read(&mut read_pin).await;
-    //    info!("comparison: {}", v);
-    //    SHARED.threshold.fetch_add(1, Ordering::Relaxed);
-    //    SHARED.hysterese.store(v, Ordering::Relaxed);
-    //}
     let mut can = init_can(can_resources).await;
     info!("can initiated");
 
