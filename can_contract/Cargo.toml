@@ -1,0 +1,9 @@
+[package]
+name = "can_contract"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+byteorder = {version = "1.5.0", default-features=false}
+embedded-can = "0.4.1"
+strum = { version = "0.27.1", default-features = false, features = ["derive", "strum_macros"] }

@@ -23,6 +23,8 @@ embedded-sdmmc = {version = "0.8.1", features = ["defmt-log"], default-features 
 embedded-hal-bus = "0.3.0"
 byteorder = {version = "1.5.0", default-features = false}
 dummy-pin = "1.0.0"
+can_contract = {version = "*", path="../can_contract"}
+embedded-can = "0.4.1"
 [profile.dev]
 opt-level = "s"
 [profile.release]

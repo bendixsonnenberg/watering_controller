@@ -9,6 +9,7 @@ use core::cell::RefCell;
 use core::panic;
 
 use assign_resources::*;
+use can_contract::*;
 use cyw43_pio::{PioSpi, DEFAULT_CLOCK_DIVIDER};
 use defmt::unwrap;
 use embassy_embedded_hal::SetConfig;
@@ -20,14 +21,25 @@ use embassy_rp::spi::{Blocking, Spi};
 use embassy_rp::usb::Driver;
 use embassy_rp::Peri;
 use embassy_rp::{bind_interrupts, spi};
-use embassy_sync::blocking_mutex::NoopMutex;
+use embassy_sync::blocking_mutex::raw::{NoopRawMutex, ThreadModeRawMutex};
+use embassy_sync::blocking_mutex::{self, NoopMutex};
 use embassy_time::{Delay, Duration, Timer};
+use embedded_can::Frame;
 use embedded_hal_bus::spi::ExclusiveDevice;
 use log::*;
+use mcp2515::frame::CanFrame;
 use mcp2515::*;
 use static_cell::StaticCell;
 use {defmt_rtt as _, panic_probe as _};
 
+type CanBus = MCP2515<
+    embassy_embedded_hal::shared_bus::blocking::spi::SpiDevice<
+        'static,
+        NoopRawMutex,
+        Spi<'static, SPI1, Blocking>,
+        Output<'static>,
+    >,
+>;
 // Program metadata for `picotool info`.
 // This isn't needed, but it's recommended to have these minimal entries.
 #[link_section = ".bi_entries"]
@@ -101,12 +113,13 @@ async fn main(spawner: Spawner) {
     // setting up usb logging
     let driver = Driver::new(p.USB, Irqs);
     unwrap!(spawner.spawn(cyw43_task(runner)));
-    unwrap!(spawner.spawn(handle_can(r.spi_can)));
     unwrap!(spawner.spawn(logger(driver)));
     control.init(clm).await;
     control
         .set_power_management(cyw43::PowerManagementMode::PowerSave)
         .await;
+    let can_mutex: blocking_mutex::Mutex<ThreadModeRawMutex, RefCell<CanBus>> =
+        blocking_mutex::Mutex::new(RefCell::new(init_can(r.spi_can)));
 
     // setting up can bus
 
@@ -121,8 +134,8 @@ async fn main(spawner: Spawner) {
         Timer::after(delay).await;
     }
 }
-#[embassy_executor::task]
-async fn handle_can(can_resources: SpiCan) {
+
+fn init_can(can_resources: SpiCan) -> CanBus {
     static SPI_CAN_BUS: StaticCell<NoopMutex<RefCell<Spi<SPI1, Blocking>>>> = StaticCell::new();
     let config = spi::Config::default();
     let spi = Spi::new_blocking(
@@ -149,5 +162,15 @@ async fn handle_can(can_resources: SpiCan) {
         info!("Failed to init can_speed");
         panic!("failed")
     };
-    info!("created can bus");
+    let Ok(_) = can.set_filter(
+        filter::RxFilter::F0,
+        embedded_can::Id::Standard(get_filter_from_id(0)),
+    ) else {
+        return can;
+    }; // controller
+       // gets t have id 0
+    let Ok(_) = can.set_mask(filter::RxMask::Mask0, embedded_can::Id::Standard(MASK)) else {
+        return can;
+    };
+    can
 }

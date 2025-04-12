@@ -59,6 +59,7 @@ rand = { version = "0.8.5", default-features = false }
 embedded-sdmmc = "0.8.1"
 mcp2515 = { version = "0.3.0", features = ["defmt"] }
 embedded-can = "0.4.1"
+can_contract = {version="*", path="../can_contract/"}
 [patch.crates-io]
 embassy-rp = {git = "https://github.com/embassy-rs/embassy", rev="7e78e58"}
 embassy-time = {git = "https://github.com/embassy-rs/embassy", rev="7e78e58"}

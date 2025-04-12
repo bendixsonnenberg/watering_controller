@@ -7,11 +7,11 @@ use core::{
 };
 
 use assign_resources::assign_resources;
-use byteorder::ByteOrder;
 use can::{
     filter::{self, Mask16},
     Can, StandardId,
 };
+use can_contract::*;
 use defmt::*;
 use embassy_executor::Spawner;
 use embassy_stm32::interrupt::InterruptExt;
@@ -28,7 +28,6 @@ mod time_source;
 const LOG_INTERVAL: u64 = 5; // at n*LOG_INTERVAL seconds a log entry is written
 const CAN_BITRATE: u32 = 125_000; // bitrate for can bus. We are not transfering large amounts of
                                   // data ,so lets keep this low
-const ID_MASK: u16 = 0b000_1111_1111; // maks for can, masks out the order type
 assign_resources! {
     valve_control: ValveResources {
         adc: ADC1,
@@ -77,9 +76,9 @@ async fn main(_spawner: Spawner) {
 
     // setup relay
     _spawner.spawn(handle_valve(r.valve_control)).unwrap();
-    // _spawner
-    //     .spawn(handle_modify_threshold(r.level_setting, r.can_control))
-    //     .unwrap();
+    _spawner
+        .spawn(handle_modify_threshold(r.level_setting, r.can_control))
+        .unwrap();
 
     // _spawner.spawn(write_to_sd(r.sd_card)).unwrap();
     // sd cards can be addressed by spi.
@@ -223,7 +222,8 @@ async fn handle_modify_threshold(resources: SettingResources, can_resources: Can
     let mut can = init_can(can_resources).await;
     info!("can initiated");
 
-    send_data_over_can(&mut can, 16, 3).await;
+    let dev_id = 1;
+    send_data_over_can(&mut can, 16, Commands::Moisture, dev_id).await;
     info!("sent dummy message");
     loop {
         let res = can.read().await;
@@ -231,82 +231,85 @@ async fn handle_modify_threshold(resources: SettingResources, can_resources: Can
         if let Ok(env) = res {
             let frame = env.frame;
             info!("frame received: {:?}", env);
-            if let can::Id::Standard(message_id) = frame.id() {
-                let command = message_id.as_raw() >> 8; // removing the device id and only
-                                                        // keeping the command
-                match command {
-                    0 => {
-                        // THRESHOLD
-                        if frame.header().rtr() {
-                            // send data
-                            send_data_over_can(
-                                &mut can,
-                                SHARED.threshold.load(Ordering::Relaxed),
-                                command,
-                            )
-                            .await;
-                        } else {
-                            let len = frame.header().len();
-                            if len >= 2 {
-                                let new_threshold = byteorder::LE::read_u16(frame.data());
-                                SHARED.threshold.store(new_threshold, Ordering::Relaxed);
-                            }
+            let Some((command, _, data)) = frame_to_command_data(frame) else {
+                // ignore
+                // device id, has to be the id of this device anyways
+                continue;
+            };
+            match command {
+                Commands::Threshold => {
+                    // THRESHOLD
+                    if frame.header().rtr() {
+                        // send data
+                        send_data_over_can(
+                            &mut can,
+                            SHARED.threshold.load(Ordering::Relaxed),
+                            command,
+                            dev_id,
+                        )
+                        .await;
+                    } else {
+                        let len = frame.header().len();
+                        if len >= 2 {
+                            let new_threshold = data.expect("not rtr, should exists");
+                            SHARED.threshold.store(new_threshold, Ordering::Relaxed);
                         }
                     }
-                    1 => {
-                        // hysterses
-                        if frame.header().rtr() {
-                            // send data
-                            send_data_over_can(
-                                &mut can,
-                                SHARED.hysterese.load(Ordering::Relaxed),
-                                command,
-                            )
-                            .await;
-                        } else {
-                            let len = frame.header().len();
-                            if len >= 2 {
-                                let new_threshold = byteorder::LE::read_u16(frame.data());
-                                SHARED.hysterese.store(new_threshold, Ordering::Relaxed);
-                            }
+                }
+                Commands::Hysterese => {
+                    // hysterses
+                    if frame.header().rtr() {
+                        // send data
+                        send_data_over_can(
+                            &mut can,
+                            SHARED.hysterese.load(Ordering::Relaxed),
+                            command,
+                            dev_id,
+                        )
+                        .await;
+                    } else {
+                        let len = frame.header().len();
+                        if len >= 2 {
+                            let new_threshold = data.expect("not rtr, should exists");
+                            SHARED.hysterese.store(new_threshold, Ordering::Relaxed);
                         }
                     }
-                    2 => {
-                        // moisture
-                        if frame.header().rtr() {
-                            // send data
-                            send_data_over_can(
-                                &mut can,
-                                SHARED.moisture.load(Ordering::Relaxed),
-                                command,
-                            )
-                            .await;
-                        }
+                }
+                Commands::Moisture => {
+                    // moisture
+                    if frame.header().rtr() {
+                        // send data
+                        send_data_over_can(
+                            &mut can,
+                            SHARED.moisture.load(Ordering::Relaxed),
+                            command,
+                            dev_id,
+                        )
+                        .await;
                     }
-
-                    _ => (),
                 }
             }
         }
     }
 }
-async fn send_data_over_can(can: &mut Can<'_>, data: u16, command: u16) {
+async fn send_data_over_can(can: &mut Can<'_>, data: u16, command: Commands, dev_id: u8) {
     let buf = &mut [0, 0];
-    byteorder::LE::write_u16(buf, data);
-    let frame =
-        can::frame::Frame::new(create_header_from_command_device_id(command, 0), buf).unwrap();
+    can_contract::write_data_buff(data, buf);
+    let Some(std_id) = can_contract::id_from_command_and_dev_id(command, dev_id) else {
+        error!("failed generating id");
+        return;
+    };
+    let Ok(frame) = can::Frame::new_standard(std_id.as_raw(), buf) else {
+        error!("failed creating frame");
+        return;
+    };
     can.write(&frame).await;
-}
-fn create_header_from_command_device_id(command: u16, device: u16) -> can::frame::Header {
-    let id = device | (command << 8);
-    let id = can::Id::Standard(can::StandardId::new(id).expect("failed to convert id"));
-    can::frame::Header::new(id, 2, false)
 }
 
 async fn init_can(resourses: CanResources) -> Can<'static> {
     // first we define the filter, which will accept all messages directed at this device
-    let mask = StandardId::new(ID_MASK).expect("hardcoded values should conform");
-    let id = StandardId::new(0b0000_0001).unwrap(); // id is 8 bit, this will later be determined by dip switches
+    let mask = MASK;
+    let id = get_filter_from_id(1); // id is 8 bit, this will later be determined by dip switches
     let mask: Mask16 = Mask16::frames_with_std_id(id, mask);
 
     let mut can = Can::new(resourses.can, resourses.can_rx, resourses.can_tx, Irqs);
