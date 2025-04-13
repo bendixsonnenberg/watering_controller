@@ -25,6 +25,7 @@ byteorder = {version = "1.5.0", default-features = false}
 dummy-pin = "1.0.0"
 can_contract = {version = "*", path="../can_contract"}
 embedded-can = "0.4.1"
+stm32-metapac = { version = "16.0.0", features = ["defmt", "stm32f103c8"] }
 [profile.dev]
 opt-level = "s" 
 [profile.release]

@@ -30,6 +30,7 @@ use embedded_graphics::primitives::line;
 use embedded_hal_bus::spi::ExclusiveDevice;
 use log::*;
 use mcp2515::frame::CanFrame;
+use mcp2515::regs::Register;
 use mcp2515::*;
 use serde::de::value;
 use static_cell::StaticCell;
@@ -167,9 +168,9 @@ async fn values_from_adc(can: Mutex<ThreadModeRawMutex, RefCell<CanBus>>, adc_re
     let mut hysterese: u16 = 20;
     let mut example: u16 = 100;
     loop {
-        info!("entering adc loop");
         let mut buf = [Sample::default(); { SAMPLES * NUM_CHANNELS }];
         let div = 48_000_000 / (100_000 * NUM_CHANNELS) - 1;
+
         adc.read_many_multichannel_raw(&mut channels, &mut buf, div as u16, dma.reborrow())
             .await;
         let delta = |(sum, count): (u32, u32), value: &Sample| {
@@ -181,7 +182,6 @@ async fn values_from_adc(can: Mutex<ThreadModeRawMutex, RefCell<CanBus>>, adc_re
         };
         let (sum, count) = buf.iter().step_by(NUM_CHANNELS).fold((0, 0), delta);
         let v_0 = sum / count;
-        info!("before can calls");
         let r_0 = voltage_divider_resistance_upper(v_0, REFERENCE_RESISTOR_OHM);
         let new_threshold = linear_correction(1900, 2500, 100, 9000, r_0);
         let (sum, count) = buf.iter().skip(1).step_by(NUM_CHANNELS).fold((0, 0), delta);
@@ -192,6 +192,12 @@ async fn values_from_adc(can: Mutex<ThreadModeRawMutex, RefCell<CanBus>>, adc_re
         let v_2 = sum / count;
         let r_2 = voltage_divider_resistance_upper(v_2, REFERENCE_RESISTOR_OHM);
         let new_example = linear_correction(1900, 2500, 100, 9000, r_2);
+        info!("sending dummy threshold settings");
+        can.lock(|x| {
+            set_value(&mut x.borrow_mut(), Commands::Threshold, 2500, 1);
+            info!("rec: {:?}", x.borrow_mut().read_register::<1, regs::Rec>());
+            info!("tec: {:?}", x.borrow_mut().read_register::<1, regs::Tec>());
+        });
         if threshold.abs_diff(new_threshold) > ADC_JITTER_ALLOWANCE {
             threshold = new_threshold;
             info!("have to update threshold");
@@ -236,6 +242,7 @@ fn set_value(can: &mut CanBus, command: Commands, data: u16, dev_id: u8) {
 // measured resistance is the resistor to voltage
 fn voltage_divider_resistance_upper(mesurement: u32, known: u16) -> u16 {
     let alpha = known as u32 * ADC_MAX as u32;
+    let mesurement = mesurement.max(1);
     let division = (alpha) / mesurement;
     (division as u16) - known
 }
@@ -246,7 +253,7 @@ fn linear_correction(
     in_max: u16,
     input: u16,
 ) -> u16 {
-    let relative = (input - in_min) / (in_max - in_min);
+    let relative = (input.saturating_sub(in_min)) / (in_max - in_min);
     (corrected_max - corrected_min) * relative + corrected_min
 }
 async fn init_can(can_resources: SpiCan) -> CanBus {
@@ -277,14 +284,6 @@ async fn init_can(can_resources: SpiCan) -> CanBus {
         mcp_speed: McpSpeed::MHz8,
         clkout_en: false,
     };
-    match can.init(&mut Delay, settings) {
-        Ok(()) => {}
-        Err(e) => {
-            info!("Failed to init can: {:?}", e);
-            Timer::after_secs(1).await;
-            panic!("failed")
-        }
-    };
     let Ok(_) = can.set_filter(
         filter::RxFilter::F0,
         embedded_can::Id::Standard(get_filter_from_id(0)),
@@ -295,6 +294,14 @@ async fn init_can(can_resources: SpiCan) -> CanBus {
     // gets t have id 0
     let Ok(_) = can.set_mask(filter::RxMask::Mask0, embedded_can::Id::Standard(MASK)) else {
         return can;
+    };
+    match can.init(&mut Delay, settings) {
+        Ok(()) => {}
+        Err(e) => {
+            info!("Failed to init can: {:?}", e);
+            Timer::after_secs(1).await;
+            panic!("failed")
+        }
     };
     info!("successful initilization");
     can

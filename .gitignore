@@ -18,3 +18,4 @@ target/
 can_contract/Cargo.lock
 rp-controller/assets/ferris.raw
 rp-controller/Cargo.lock
+moisture_sensor_code/out

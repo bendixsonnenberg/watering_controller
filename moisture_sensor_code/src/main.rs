@@ -15,8 +15,8 @@ use can_contract::*;
 use core::future::Future;
 use defmt::*;
 use embassy_executor::Spawner;
-use embassy_stm32::*;
 use embassy_stm32::{interrupt::InterruptExt, peripherals::ADC1};
+use embassy_stm32::{rcc::Sysclk, time::Hertz, *};
 use embassy_time::{Instant, Timer};
 use embedded_hal_bus::spi::ExclusiveDevice;
 use embedded_sdmmc::{self, sdcard::AcquireOpts, SdCard, VolumeIdx, VolumeManager};
@@ -68,7 +68,13 @@ bind_interrupts!(struct Irqs {
 #[embassy_executor::main]
 async fn main(_spawner: Spawner) {
     info!("Hallo ");
-    let p = embassy_stm32::init(Default::default());
+    let mut config = Config::default();
+    config.rcc.hse = Some(rcc::Hse {
+        freq: Hertz::mhz(8),
+        mode: rcc::HseMode::Oscillator,
+    });
+    config.rcc.sys = Sysclk::HSE;
+    let p = embassy_stm32::init(config);
     let r = split_resources!(p);
 
     // setup relay
@@ -77,10 +83,6 @@ async fn main(_spawner: Spawner) {
         .spawn(handle_modify_threshold(r.can_control))
         .unwrap();
 
-    // _spawner.spawn(write_to_sd(r.sd_card)).unwrap();
-    // sd cards can be addressed by spi.
-    // there is a crate to hande the file system stuff, but it needs a embedded_hal abstraction,
-    // therefore we use embassy_embedded_hal to adapt between them.
     //
     // create spi device
 }
@@ -106,7 +108,7 @@ async fn handle_valve(resources: ValveResources) {
     let hystere = 20;
     loop {
         let v = adc.read(&mut moisture_level_pin).await;
-        info!("Sample: {}", v);
+        trace!("Sample: {}", v);
 
         let threshold = SHARED.threshold.load(Ordering::Relaxed);
         // if v > threshold - hystere {
@@ -129,10 +131,15 @@ async fn handle_modify_threshold(can_resources: CanResources) {
     info!("can initiated");
 
     let dev_id = 1;
-    send_data_over_can(&mut can, 16, Commands::Moisture, dev_id).await;
+    // send_data_over_can(&mut can, 16, Commands::Threshold, dev_id).await;
     info!("sent dummy message");
+
     loop {
-        info!("joining loop");
+        let reg = stm32_metapac::can::Can::esr(stm32_metapac::CAN);
+
+        info!("Rec: {:?}", reg.read().rec());
+        info!("Tec: {:?}", reg.read().tec());
+        Timer::after_millis(500).await;
         let res = can.read().await;
         info!("got frame: {:?}", res);
         if let Ok(env) = res {
@@ -210,7 +217,7 @@ async fn send_data_over_can(can: &mut Can<'_>, data: u16, command: Commands, dev
         error!("failed creating frame");
         return;
     };
-    can.write(&frame).await;
+    let r = can.write(&frame).await;
 }
 
 async fn init_can(resourses: CanResources) -> Can<'static> {
