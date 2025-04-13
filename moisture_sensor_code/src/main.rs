@@ -12,10 +12,11 @@ use can::{
     Can, StandardId,
 };
 use can_contract::*;
+use core::future::Future;
 use defmt::*;
 use embassy_executor::Spawner;
-use embassy_stm32::interrupt::InterruptExt;
 use embassy_stm32::*;
+use embassy_stm32::{interrupt::InterruptExt, peripherals::ADC1};
 use embassy_time::{Instant, Timer};
 use embedded_hal_bus::spi::ExclusiveDevice;
 use embedded_sdmmc::{self, sdcard::AcquireOpts, SdCard, VolumeIdx, VolumeManager};
@@ -33,10 +34,6 @@ assign_resources! {
         adc: ADC1,
         valve_pin: PC13,
         moisture_pin: PA0,
-    },
-    level_setting: SettingResources {
-        adc: ADC2,
-        measure_pin: PA4,
     },
     can_control: CanResources {
         can: CAN,
@@ -62,7 +59,7 @@ static SHARED: SharedData = SharedData {
     moisture: AtomicU16::new(0),
 };
 bind_interrupts!(struct Irqs {
-    ADC1_2 => adc::InterruptHandler<peripherals::ADC1>, adc::InterruptHandler<peripherals::ADC2>;
+    ADC1_2 => adc::InterruptHandler<peripherals::ADC1>;
     USB_LP_CAN1_RX0 => can::Rx0InterruptHandler<peripherals::CAN>;
     CAN1_RX1 => can::Rx1InterruptHandler<peripherals::CAN>;
     CAN1_SCE => can::SceInterruptHandler<peripherals::CAN>;
@@ -77,7 +74,7 @@ async fn main(_spawner: Spawner) {
     // setup relay
     _spawner.spawn(handle_valve(r.valve_control)).unwrap();
     _spawner
-        .spawn(handle_modify_threshold(r.level_setting, r.can_control))
+        .spawn(handle_modify_threshold(r.can_control))
         .unwrap();
 
     // _spawner.spawn(write_to_sd(r.sd_card)).unwrap();
@@ -89,105 +86,18 @@ async fn main(_spawner: Spawner) {
 }
 
 #[embassy_executor::task]
-async fn write_to_sd(resources: SdCardResources) {
-    let mut config = spi::Config::default();
-    config.frequency = time::Hertz::khz(400);
-    let spi = spi::Spi::new_blocking(
-        resources.spi,
-        resources.sclk,
-        resources.mosi,
-        resources.miso,
-        config,
-    );
-    let sd_control_pin = Output::new(resources.ss, Level::High, Speed::Low);
-    let spi_dev = ExclusiveDevice::new_no_delay(spi, sd_control_pin).unwrap();
-
-    let aquire_options = AcquireOpts {
-        acquire_retries: 5,
-        use_crc: false,
-    };
-    // setup sd card
-    info!("Using {} hz", embassy_time::TICK_HZ);
-    let sd_card = SdCard::new_with_options(spi_dev, embassy_time::Delay, aquire_options);
-    info!("card size is:  {}", sd_card.num_bytes().unwrap());
-
-    // need time source, maybe write self, just return zero always
-    let mut vol = VolumeManager::new(sd_card, DummyTimeSource::dummy());
-
-    // always select the first volume on the card, sacrificing a 8gb sd card is not something that
-    // has to be avoided. We assume this sd card is dedicated to this task.
-    let volume = vol.open_volume(VolumeIdx(0));
-    info!("{:?}", volume);
-    if let Ok(mut vol0) = volume {
-        if let Ok(mut root_dir) = vol0.open_root_dir() {
-            let file = root_dir.open_file_in_dir(
-                "log_file.csv",
-                embedded_sdmmc::Mode::ReadWriteCreateOrTruncate,
-            );
-            info!("{:?}", file);
-            if let Ok(mut file) = file {
-                // file was successfully opened, otherwise this will have failed
-                //
-                // writing formatting line!()
-                // let _ = file.write(b"s, m, t, h\n");
-                loop {
-                    // let mut buffer: String<32> = String::new();
-                    //
-                    // let fmt_res = core::write!(
-                    //     &mut buffer,
-                    //     "{}, {}, {}, {}",
-                    //     Instant::now().as_secs(),
-                    //     SHARED.moisture.load(Ordering::Relaxed),
-                    //     SHARED.threshold.load(Ordering::Relaxed),
-                    //     SHARED.hysterese.load(Ordering::Relaxed)
-                    // );
-                    // let write_res = file.write(buffer.as_bytes());
-                    // let flush_res = file.flush();
-                    // if fmt_res.is_err() || write_res.is_err() || flush_res.is_err() {
-                    //     info!(
-                    //         "Writing to sd card failed, fmt: {:?}, write: {:?}, flush: {:?}",
-                    //         fmt_res.is_err(),
-                    //         write_res.is_err(),
-                    //         flush_res.is_err()
-                    //     );
-                    // }
-                    Timer::after_secs(10).await;
-                }
-            } else {
-                info!("failed opening file");
-            }
-        } else {
-            info!("Failed opening root_dir");
-        }
-    } else {
-        info!("Failed opening volume");
-    };
-    info!("Opening sd card failed");
-    let mut i = 0;
-    loop {
-        info!(
-            "Time: {}s, Moisture: {}, Threshold: {}, Hysterese: {}",
-            Instant::now().as_secs(),
-            SHARED.moisture.load(Ordering::Relaxed),
-            SHARED.threshold.load(Ordering::Relaxed),
-            SHARED.hysterese.load(Ordering::Relaxed)
-        );
-        Timer::at(Instant::from_secs(LOG_INTERVAL * i)).await;
-        i += 1;
-    }
-}
-#[embassy_executor::task]
 async fn handle_valve(resources: ValveResources) {
     let mut adc = adc::Adc::new(resources.adc);
     let mut moisture_level_pin = resources.moisture_pin;
     let mut valve_pin = Output::new(resources.valve_pin, Level::Low, Speed::Low);
-    let mut vrefint = adc.enable_vref();
+    // let mut vrefint = adc.enable_vref();
     unsafe {
         // adc needs a hack in embassy to work. See embassy issue #2162
         interrupt::ADC1_2.enable();
     }
-    let vref_sample = adc.read(&mut vrefint).await;
-    info!("vref_sample: {}", vref_sample);
+
+    // let vref_sample = adc.read(&mut vrefint).await;
+    // info!("vref_sample: {}", vref_sample);
 
     let value_dry = 2400;
     let value_wet = 2200;
@@ -195,30 +105,26 @@ async fn handle_valve(resources: ValveResources) {
     SHARED.threshold.store(threshold, Ordering::Relaxed);
     let hystere = 20;
     loop {
-        //info!("starting loop");
         let v = adc.read(&mut moisture_level_pin).await;
-
-        SHARED.moisture.store(v, Ordering::Relaxed);
         info!("Sample: {}", v);
 
         let threshold = SHARED.threshold.load(Ordering::Relaxed);
-        if v > threshold - hystere {
-            // wet condition, set to fill put water, then wait for 2min before trying to water
-            // again
-            info!("watering now");
-            valve_pin.set_high();
-            Timer::after_secs(30).await;
-            valve_pin.set_low();
-            info!("waiting for backoff");
-            Timer::after_secs(15 * 60).await;
-        }
+        // if v > threshold - hystere {
+        //     // wet condition, set to fill put water, then wait for 2min before trying to water
+        //     // again
+        //     info!("watering now");
+        //     valve_pin.set_high();
+        //     Timer::after_secs(30).await;
+        //     valve_pin.set_low();
+        //     info!("waiting for backoff");
+        //     Timer::after_secs(15 * 60).await;
+        // }
         Timer::after_millis(100).await;
-        //info!("Timer Done");
     }
 }
 
 #[embassy_executor::task]
-async fn handle_modify_threshold(resources: SettingResources, can_resources: CanResources) {
+async fn handle_modify_threshold(can_resources: CanResources) {
     let mut can = init_can(can_resources).await;
     info!("can initiated");
 
@@ -226,6 +132,7 @@ async fn handle_modify_threshold(resources: SettingResources, can_resources: Can
     send_data_over_can(&mut can, 16, Commands::Moisture, dev_id).await;
     info!("sent dummy message");
     loop {
+        info!("joining loop");
         let res = can.read().await;
         info!("got frame: {:?}", res);
         if let Ok(env) = res {
