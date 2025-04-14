@@ -3,12 +3,13 @@ use byteorder::ByteOrder;
 use embedded_can::Id;
 use embedded_can::*;
 use strum::FromRepr;
-
+/// most commands can be used with a remote frame to get the value, and with a data frame to set it
 #[derive(FromRepr, Debug)]
 #[repr(u8)]
 pub enum Commands {
     Threshold = 0,
     Hysterese = 1,
+    // can't set moisture
     Moisture = 2,
 }
 
@@ -37,21 +38,26 @@ pub fn frame_to_command_data<U: Frame>(frame: U) -> Option<(Commands, u8, Option
     };
     Some((command, dev_id, data))
 }
-pub fn write_data_buff(data: u16, buff: &mut [u8]) -> Option<()> {
-    if buff.len() < 2 {
-        return None;
-    }
-
-    byteorder::LittleEndian::write_u16(buff, data);
-    Some(())
+pub fn create_data_buf(data: u16, dev_id: u8) -> [u8; 3] {
+    let mut buf = [0_u8; 3];
+    byteorder::LittleEndian::write_u16(&mut buf, data);
+    buf[2] = dev_id;
+    buf
 }
 #[cfg(test)]
 mod tests {
     use super::*;
     #[test]
     fn test_data_buffer() {
-        let mut buf: [u8; 2] = [0, 0];
-        write_data_buff(512, &mut buf);
-        assert_eq!(buf, [0, 2]);
+        let buf = create_data_buf(512, 2);
+        assert_eq!(buf, [0, 2, 2]);
+    }
+    #[test]
+    fn id_generation() {
+        let Some(id) = id_from_command_and_dev_id(Commands::Moisture, 4) else {
+            // moisture : 2, id = 4 => 0b010_0000_0100
+            panic!("failed creating valid id")
+        };
+        assert_eq!(id.as_raw(), 0x204);
     }
 }
