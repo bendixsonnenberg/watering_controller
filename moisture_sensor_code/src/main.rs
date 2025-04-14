@@ -29,6 +29,7 @@ mod time_source;
 const LOG_INTERVAL: u64 = 5; // at n*LOG_INTERVAL seconds a log entry is written
 const CAN_BITRATE: u32 = 125_000; // bitrate for can bus. We are not transfering large amounts of
                                   // data ,so lets keep this low
+
 assign_resources! {
     valve_control: ValveResources {
         adc: ADC1,
@@ -128,23 +129,21 @@ async fn handle_valve(resources: ValveResources) {
 #[embassy_executor::task]
 async fn handle_modify_threshold(can_resources: CanResources) {
     let mut can = init_can(can_resources).await;
-    info!("can initiated");
+    trace!("can initiated");
 
     let dev_id = 1;
     // send_data_over_can(&mut can, 16, Commands::Threshold, dev_id).await;
-    info!("sent dummy message");
 
     loop {
         let reg = stm32_metapac::can::Can::esr(stm32_metapac::CAN);
 
-        info!("Rec: {:?}", reg.read().rec());
-        info!("Tec: {:?}", reg.read().tec());
-        Timer::after_millis(500).await;
+        trace!("Rec: {:?}", reg.read().rec());
+        trace!("Tec: {:?}", reg.read().tec());
         let res = can.read().await;
-        info!("got frame: {:?}", res);
+        trace!("got frame: {:?}", res);
         if let Ok(env) = res {
             let frame = env.frame;
-            info!("frame received: {:?}", env);
+            trace!("frame received: {:?}", env);
             let Some((command, _, data)) = frame_to_command_data(frame) else {
                 // ignore
                 // device id, has to be the id of this device anyways
@@ -152,6 +151,7 @@ async fn handle_modify_threshold(can_resources: CanResources) {
             };
             match command {
                 Commands::Threshold => {
+                    info!("Threshold: {:?}", data);
                     // THRESHOLD
                     if frame.header().rtr() {
                         // send data
@@ -171,6 +171,7 @@ async fn handle_modify_threshold(can_resources: CanResources) {
                     }
                 }
                 Commands::Hysterese => {
+                    info!("Hysterese: {:?}", data);
                     // hysterses
                     if frame.header().rtr() {
                         // send data
@@ -190,6 +191,7 @@ async fn handle_modify_threshold(can_resources: CanResources) {
                     }
                 }
                 Commands::Moisture => {
+                    info!("Moisture: {:?}", data);
                     // moisture
                     if frame.header().rtr() {
                         // send data

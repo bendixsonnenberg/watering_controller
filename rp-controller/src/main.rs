@@ -28,6 +28,7 @@ use embassy_time::{Delay, Duration, Timer};
 use embedded_can::Frame;
 use embedded_graphics::primitives::line;
 use embedded_hal_bus::spi::ExclusiveDevice;
+use embedded_sdmmc::sdcard::SdCard;
 use log::*;
 use mcp2515::frame::CanFrame;
 use mcp2515::regs::Register;
@@ -180,6 +181,7 @@ async fn values_from_adc(can: Mutex<ThreadModeRawMutex, RefCell<CanBus>>, adc_re
                 (sum, count)
             }
         };
+        // deinterlacing buf so that only the results for a single pin are considered
         let (sum, count) = buf.iter().step_by(NUM_CHANNELS).fold((0, 0), delta);
         let v_0 = sum / count;
         let r_0 = voltage_divider_resistance_upper(v_0, REFERENCE_RESISTOR_OHM);
@@ -192,12 +194,10 @@ async fn values_from_adc(can: Mutex<ThreadModeRawMutex, RefCell<CanBus>>, adc_re
         let v_2 = sum / count;
         let r_2 = voltage_divider_resistance_upper(v_2, REFERENCE_RESISTOR_OHM);
         let new_example = linear_correction(1900, 2500, 100, 9000, r_2);
-        info!("sending dummy threshold settings");
-        can.lock(|x| {
-            set_value(&mut x.borrow_mut(), Commands::Threshold, 2500, 1);
-            info!("rec: {:?}", x.borrow_mut().read_register::<1, regs::Rec>());
-            info!("tec: {:?}", x.borrow_mut().read_register::<1, regs::Tec>());
-        });
+        info!(
+            "threshold: {}, {},| hysterese {}, {}| example: {}, {}",
+            new_threshold, v_0, new_hysterese, v_1, new_example, v_2
+        );
         if threshold.abs_diff(new_threshold) > ADC_JITTER_ALLOWANCE {
             threshold = new_threshold;
             info!("have to update threshold");
@@ -220,6 +220,7 @@ async fn values_from_adc(can: Mutex<ThreadModeRawMutex, RefCell<CanBus>>, adc_re
     }
 }
 
+// can set and get values
 fn set_value(can: &mut CanBus, command: Commands, data: u16, dev_id: u8) {
     let Some(id) = can_contract::id_from_command_and_dev_id(command, dev_id) else {
         return;
@@ -227,6 +228,22 @@ fn set_value(can: &mut CanBus, command: Commands, data: u16, dev_id: u8) {
     let mut buf = [0_u8; 2];
     can_contract::write_data_buff(data, &mut buf);
     let Some(frame) = CanFrame::new(id, &buf) else {
+        return;
+    };
+    match can.send_message(frame) {
+        Ok(_) => {
+            info!("sent can message")
+        }
+        Err(e) => {
+            info!("{:?}", e)
+        }
+    }
+}
+fn get_value(can: &mut CanBus, command: Commands, dev_id: u8) {
+    let Some(id) = can_contract::id_from_command_and_dev_id(command, dev_id) else {
+        return;
+    };
+    let Some(frame) = CanFrame::new_remote(id, 2) else {
         return;
     };
     match can.send_message(frame) {
@@ -254,7 +271,7 @@ fn linear_correction(
     input: u16,
 ) -> u16 {
     let relative = (input.saturating_sub(in_min)) / (in_max - in_min);
-    (corrected_max - corrected_min) * relative + corrected_min
+    ((corrected_max - corrected_min) * relative + corrected_min).clamp(corrected_min, corrected_max)
 }
 async fn init_can(can_resources: SpiCan) -> CanBus {
     info!("initiating can");

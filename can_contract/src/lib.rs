@@ -4,7 +4,7 @@ use embedded_can::Id;
 use embedded_can::*;
 use strum::FromRepr;
 
-#[derive(FromRepr)]
+#[derive(FromRepr, Debug)]
 #[repr(u8)]
 pub enum Commands {
     Threshold = 0,

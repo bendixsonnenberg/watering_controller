@@ -56,7 +56,7 @@ static_cell = "2.1"
 portable-atomic = { version = "1.5", features = ["critical-section"] }
 log = "0.4"
 rand = { version = "0.8.5", default-features = false }
-embedded-sdmmc = "0.8.1"
+embedded-sdmmc = { version = "0.8.1"}
 mcp2515 = { version = "0.3.0", features = ["defmt"] }
 embedded-can = "0.4.1"
 can_contract = {version="*", path="../can_contract/"}
