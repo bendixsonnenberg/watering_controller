@@ -4,7 +4,7 @@ use embedded_can::Id;
 use embedded_can::*;
 use strum::FromRepr;
 /// most commands can be used with a remote frame to get the value, and with a data frame to set it
-#[derive(FromRepr, Debug)]
+#[derive(FromRepr, Debug, Eq, PartialEq, Copy, Clone)]
 #[repr(u8)]
 pub enum Commands {
     Threshold = 0,
@@ -21,20 +21,22 @@ pub fn get_filter_from_id(id: u8) -> StandardId {
 pub fn id_from_command_and_dev_id(command: Commands, id: u8) -> Option<StandardId> {
     StandardId::new(((command as u16) << 8) | id as u16)
 }
-/// extracts command, device_id and data from frame
+/// extracts command, device_id of source and data from frame
 /// if not a standard frame, return None
 /// if the frame is not a data frame, the option<u16> will be none
-pub fn frame_to_command_data<U: Frame>(frame: U) -> Option<(Commands, u8, Option<u16>)> {
+pub fn frame_to_command_data<U: Frame>(frame: U) -> Option<(Commands, Option<u8>, Option<u16>)> {
     let Id::Standard(id) = frame.id() else {
         return None;
     };
 
     let command = Commands::from_repr((id.as_raw().checked_shr(8)?) as u8)?;
-    let dev_id = (id.as_raw() & COMMAND_MASK) as u8;
-    let data: Option<u16> = if frame.is_data_frame() && frame.dlc() >= 2 {
-        Some(byteorder::LittleEndian::read_u16(frame.data()))
+    let (data, dev_id): (Option<u16>, Option<u8>) = if frame.is_data_frame() && frame.dlc() >= 3 {
+        (
+            Some(byteorder::LittleEndian::read_u16(frame.data())),
+            Some(frame.data()[2]),
+        )
     } else {
-        None
+        (None, None)
     };
     Some((command, dev_id, data))
 }

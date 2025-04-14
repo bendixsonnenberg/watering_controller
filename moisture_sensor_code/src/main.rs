@@ -112,16 +112,16 @@ async fn handle_valve(resources: ValveResources) {
         trace!("Sample: {}", v);
 
         let threshold = SHARED.threshold.load(Ordering::Relaxed);
-        // if v > threshold - hystere {
-        //     // wet condition, set to fill put water, then wait for 2min before trying to water
-        //     // again
-        //     info!("watering now");
-        //     valve_pin.set_high();
-        //     Timer::after_secs(30).await;
-        //     valve_pin.set_low();
-        //     info!("waiting for backoff");
-        //     Timer::after_secs(15 * 60).await;
-        // }
+        if v > threshold - hystere {
+            // wet condition, set to fill put water, then wait for 2min before trying to water
+            // again
+            info!("watering now");
+            valve_pin.set_high();
+            Timer::after_secs(30).await;
+            valve_pin.set_low();
+            info!("waiting for backoff");
+            Timer::after_secs(15 * 60).await;
+        }
         Timer::after_millis(100).await;
     }
 }
@@ -159,6 +159,7 @@ async fn handle_modify_threshold(can_resources: CanResources) {
                             &mut can,
                             SHARED.threshold.load(Ordering::Relaxed),
                             command,
+                            0,
                             dev_id,
                         )
                         .await;
@@ -179,6 +180,7 @@ async fn handle_modify_threshold(can_resources: CanResources) {
                             &mut can,
                             SHARED.hysterese.load(Ordering::Relaxed),
                             command,
+                            0,
                             dev_id,
                         )
                         .await;
@@ -199,6 +201,7 @@ async fn handle_modify_threshold(can_resources: CanResources) {
                             &mut can,
                             SHARED.moisture.load(Ordering::Relaxed),
                             command,
+                            0,
                             dev_id,
                         )
                         .await;
@@ -208,14 +211,19 @@ async fn handle_modify_threshold(can_resources: CanResources) {
         }
     }
 }
-async fn send_data_over_can(can: &mut Can<'_>, data: u16, command: Commands, dev_id: u8) {
-    let buf = &mut [0, 0];
-    can_contract::write_data_buff(data, buf);
-    let Some(std_id) = can_contract::id_from_command_and_dev_id(command, dev_id) else {
+async fn send_data_over_can(
+    can: &mut Can<'_>,
+    data: u16,
+    command: Commands,
+    target_id: u8,
+    source_id: u8,
+) {
+    let buf = can_contract::create_data_buf(data, source_id);
+    let Some(std_id) = can_contract::id_from_command_and_dev_id(command, target_id) else {
         error!("failed generating id");
         return;
     };
-    let Ok(frame) = can::Frame::new_standard(std_id.as_raw(), buf) else {
+    let Ok(frame) = can::Frame::new_standard(std_id.as_raw(), &buf) else {
         error!("failed creating frame");
         return;
     };

@@ -10,6 +10,7 @@ use core::panic;
 
 use assign_resources::*;
 use can_contract::*;
+use core::fmt::Write;
 use cyw43_pio::{DEFAULT_CLOCK_DIVIDER, PioSpi};
 use defmt::unwrap;
 use embassy_executor::Spawner;
@@ -23,8 +24,11 @@ use embassy_rp::usb::Driver;
 use embassy_rp::{bind_interrupts, spi};
 use embassy_sync::blocking_mutex::raw::{NoopRawMutex, ThreadModeRawMutex};
 use embassy_sync::blocking_mutex::{self, Mutex, NoopMutex};
-use embassy_time::{Delay, Duration, Timer};
+use embassy_time::{Delay, Duration, Instant, Ticker, Timer};
 use embedded_can::Frame;
+use embedded_hal_bus::spi::ExclusiveDevice;
+use embedded_sdmmc::{SdCard, VolumeIdx, VolumeManager, sdcard};
+use heapless::String;
 use log::*;
 use mcp2515::frame::CanFrame;
 use mcp2515::*;
@@ -34,6 +38,7 @@ const REFERENCE_RESISTOR_OHM: u16 = 100;
 const ADC_JITTER_ALLOWANCE: u16 = 100; // the amount the adc reading has to differ for it to be
 // considred changed
 const ADC_MAX: u16 = 4096;
+const CONTROLLER_DEV_ID: u8 = 0;
 type CanBus = MCP2515<
     embassy_embedded_hal::shared_bus::blocking::spi::SpiDevice<
         'static,
@@ -42,6 +47,8 @@ type CanBus = MCP2515<
         Output<'static>,
     >,
 >;
+type CanBusMutex =
+    embassy_sync::mutex::Mutex<embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex, CanBus>;
 // Program metadata for `picotool info`.
 // This isn't needed, but it's recommended to have these minimal entries.
 #[unsafe(link_section = ".bi_entries")]
@@ -69,6 +76,13 @@ assign_resources! {
         pin0: PIN_26,
         pin1: PIN_27,
         pin2: PIN_28,
+    },
+    spi_sdcard: SpiSdcard {
+        spi: SPI0,
+        miso: PIN_4,
+        mosi: PIN_3,
+        clk: PIN_2,
+        cs: PIN_5,
     }
 }
 
@@ -124,20 +138,23 @@ async fn main(spawner: Spawner) {
     let driver = Driver::new(p.USB, Irqs);
     unwrap!(spawner.spawn(cyw43_task(runner)));
     unwrap!(spawner.spawn(logger(driver)));
-    Timer::after_secs(5).await;
     info!("hello");
     control.init(clm).await;
     control
         .set_power_management(cyw43::PowerManagementMode::PowerSave)
         .await;
-    let can_mutex: blocking_mutex::Mutex<ThreadModeRawMutex, RefCell<CanBus>> =
-        blocking_mutex::Mutex::new(RefCell::new(init_can(r.spi_can).await));
+    static CAN: StaticCell<CanBusMutex> = StaticCell::new();
 
-    unwrap!(spawner.spawn(values_from_adc(can_mutex, r.adcs)));
-    // setting up can bus
+    let can = init_can(r.spi_can).await;
+
+    let can = CAN.init(embassy_sync::mutex::Mutex::new(can));
+
+    unwrap!(spawner.spawn(values_from_adc(can, r.adcs)));
+    unwrap!(spawner.spawn(sd_card_log(can, r.spi_sdcard)));
 
     let delay = Duration::from_millis(250);
     loop {
+        // TODO: add respawning the sd card task, if it terminated
         control.gpio_set(0, true).await;
         Timer::after(delay).await;
 
@@ -146,8 +163,97 @@ async fn main(spawner: Spawner) {
     }
 }
 
+struct DummyTimesource();
+
+impl embedded_sdmmc::TimeSource for DummyTimesource {
+    fn get_timestamp(&self) -> embedded_sdmmc::Timestamp {
+        embedded_sdmmc::Timestamp {
+            year_since_1970: 0,
+            zero_indexed_month: 0,
+            zero_indexed_day: 0,
+            hours: 0,
+            minutes: 0,
+            seconds: 0,
+        }
+    }
+}
+
 #[embassy_executor::task]
-async fn values_from_adc(can: Mutex<ThreadModeRawMutex, RefCell<CanBus>>, adc_ressources: Adcs) {
+async fn sd_card_log(can: &'static CanBusMutex, mut sd_card_resources: SpiSdcard) {
+    // this overarching loop enables the sd card to be inserted later
+    loop {
+        let mut config = spi::Config::default();
+        config.frequency = 400_000; // for initilization the frequency has to be below 400khz
+        let spi = Spi::new_blocking(
+            sd_card_resources.spi.reborrow(),
+            sd_card_resources.clk.reborrow(),
+            sd_card_resources.mosi.reborrow(),
+            sd_card_resources.miso.reborrow(),
+            config,
+        );
+        let cs = Output::new(sd_card_resources.cs.reborrow(), Level::High);
+        let spi_dev = ExclusiveDevice::new_no_delay(spi, cs);
+
+        let sdcard = SdCard::new(spi_dev, embassy_time::Delay);
+
+        let mut volume_mgr = VolumeManager::new(sdcard, DummyTimesource());
+
+        let Ok(mut vol0) = volume_mgr.open_volume(VolumeIdx(0)) else {
+            error!("Failed opening volume, not logging anymore, retrying");
+            continue;
+        };
+
+        let Ok(mut root_dir) = vol0.open_root_dir() else {
+            error!("Failed opening dir");
+            continue;
+        };
+
+        let Ok(mut log_file) = root_dir.open_file_in_dir(
+            "log_file.csv",
+            embedded_sdmmc::Mode::ReadWriteCreateOrTruncate,
+        ) else {
+            error!("failed opening file");
+            continue;
+        };
+
+        let Ok(_) = log_file.write(b"time, moisture, threshold, hysterese\n") else {
+            continue;
+        };
+        let Ok(_) = log_file.flush() else {
+            continue;
+        };
+        let mut ticker = Ticker::every(Duration::from_secs_floor(5));
+        loop {
+            let mut can = can.lock().await;
+            let time = Instant::now().as_secs();
+            let moisture = get_value(&mut can, Commands::Moisture, 1).await;
+            let threshold = get_value(&mut can, Commands::Threshold, 1).await;
+            let hysterese = get_value(&mut can, Commands::Hysterese, 1).await;
+            let mut buffer: String<32> = String::new();
+            let Ok(_) = core::writeln!(
+                &mut buffer,
+                "{}, {}, {}, {}",
+                time,
+                moisture.unwrap_or(0),
+                threshold.unwrap_or(0),
+                hysterese.unwrap_or(0)
+            ) else {
+                break;
+            };
+            let Ok(_) = log_file.write(buffer.as_bytes()) else {
+                break;
+            };
+            let Ok(_) = log_file.flush() else {
+                break;
+            };
+            ticker.next().await;
+        }
+        Timer::after_secs(60).await;
+    }
+}
+
+#[embassy_executor::task]
+async fn values_from_adc(can: &'static CanBusMutex, adc_ressources: Adcs) {
     info!("starting adcs");
     let mut adc = Adc::new(adc_ressources.adc, Irqs, embassy_rp::adc::Config::default());
     let mut dma = adc_ressources.dma;
@@ -195,16 +301,14 @@ async fn values_from_adc(can: Mutex<ThreadModeRawMutex, RefCell<CanBus>>, adc_re
         if threshold.abs_diff(new_threshold) > ADC_JITTER_ALLOWANCE {
             threshold = new_threshold;
             info!("have to update threshold");
-            can.lock(|x| {
-                set_value(&mut x.borrow_mut(), Commands::Threshold, threshold, 1);
-            });
+            let mut can = can.lock().await;
+            set_value(&mut can, Commands::Threshold, new_threshold, 1);
         }
         if hysterese.abs_diff(new_hysterese) > ADC_JITTER_ALLOWANCE {
             hysterese = new_hysterese;
             info!("have to update hysterese");
-            can.lock(|x| {
-                set_value(&mut x.borrow_mut(), Commands::Hysterese, hysterese, 1);
-            });
+            let mut can = can.lock().await;
+            set_value(&mut can, Commands::Hysterese, new_hysterese, 1);
         }
         if example.abs_diff(new_example) > ADC_JITTER_ALLOWANCE {
             example = new_example;
@@ -219,8 +323,7 @@ fn set_value(can: &mut CanBus, command: Commands, data: u16, dev_id: u8) {
     let Some(id) = can_contract::id_from_command_and_dev_id(command, dev_id) else {
         return;
     };
-    let mut buf = [0_u8; 2];
-    can_contract::write_data_buff(data, &mut buf);
+    let buf = can_contract::create_data_buf(data, CONTROLLER_DEV_ID);
     let Some(frame) = CanFrame::new(id, &buf) else {
         return;
     };
@@ -233,21 +336,29 @@ fn set_value(can: &mut CanBus, command: Commands, data: u16, dev_id: u8) {
         }
     }
 }
-fn get_value(can: &mut CanBus, command: Commands, dev_id: u8) {
-    let Some(id) = can_contract::id_from_command_and_dev_id(command, dev_id) else {
-        return;
-    };
-    let Some(frame) = CanFrame::new_remote(id, 2) else {
-        return;
-    };
+async fn get_value(can: &mut CanBus, command: Commands, dev_id: u8) -> Option<u16> {
+    let id = can_contract::id_from_command_and_dev_id(command, dev_id)?;
+    let frame = CanFrame::new_remote(id, 3)?;
     match can.send_message(frame) {
         Ok(_) => {
             info!("sent can message")
         }
         Err(e) => {
-            info!("{:?}", e)
+            info!("{:?}", e);
+            return None;
+        }
+    };
+
+    Timer::after_millis(5).await; //TODO: this wait is here to let the other side answer, maybe do
+    //it smarter
+    while let Ok(frame) = can.read_message() {
+        if let Some((r_command, r_source_id, r_data)) = can_contract::frame_to_command_data(frame) {
+            if r_command == command && r_source_id.unwrap_or(CONTROLLER_DEV_ID) == dev_id {
+                return r_data;
+            }
         }
     }
+    None
 }
 // calculate the resistance of a unknown resistor, by using a known reference resistor. The
 // measured resistance is the resistor to voltage
