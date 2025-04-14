@@ -22,12 +22,12 @@ use embassy_rp::pio::{InterruptHandler, Pio};
 use embassy_rp::spi::{Blocking, Spi};
 use embassy_rp::usb::Driver;
 use embassy_rp::{bind_interrupts, spi};
-use embassy_sync::blocking_mutex::raw::{NoopRawMutex, ThreadModeRawMutex};
-use embassy_sync::blocking_mutex::{self, Mutex, NoopMutex};
+use embassy_sync::blocking_mutex::raw::NoopRawMutex;
+use embassy_sync::blocking_mutex::{NoopMutex};
 use embassy_time::{Delay, Duration, Instant, Ticker, Timer};
 use embedded_can::Frame;
 use embedded_hal_bus::spi::ExclusiveDevice;
-use embedded_sdmmc::{SdCard, VolumeIdx, VolumeManager, sdcard};
+use embedded_sdmmc::{SdCard, VolumeIdx, VolumeManager};
 use heapless::String;
 use log::*;
 use mcp2515::frame::CanFrame;
@@ -216,7 +216,9 @@ async fn sd_card_log(can: &'static CanBusMutex, mut sd_card_resources: SpiSdcard
             continue;
         };
 
-        let Ok(_) = log_file.write(b"time, moisture, threshold, hysterese\n") else {
+        let Ok(_) =
+            log_file.write(b"time, moisture, threshold, hysterese, backoff, wateringTime\n")
+        else {
             continue;
         };
         let Ok(_) = log_file.flush() else {
@@ -229,14 +231,18 @@ async fn sd_card_log(can: &'static CanBusMutex, mut sd_card_resources: SpiSdcard
             let moisture = get_value(&mut can, Commands::Moisture, 1).await;
             let threshold = get_value(&mut can, Commands::Threshold, 1).await;
             let hysterese = get_value(&mut can, Commands::Hysterese, 1).await;
+            let backoff = get_value(&mut can, Commands::BackoffTime, 1).await;
+            let watering_time = get_value(&mut can, Commands::WateringTime, 1).await;
             let mut buffer: String<32> = String::new();
             let Ok(_) = core::writeln!(
                 &mut buffer,
-                "{}, {}, {}, {}",
+                "{}, {}, {}, {}, {}, {}",
                 time,
                 moisture.unwrap_or(0),
                 threshold.unwrap_or(0),
-                hysterese.unwrap_or(0)
+                hysterese.unwrap_or(0),
+                backoff.unwrap_or(0),
+                watering_time.unwrap_or(0),
             ) else {
                 break;
             };
@@ -266,8 +272,8 @@ async fn values_from_adc(can: &'static CanBusMutex, adc_ressources: Adcs) {
     const SAMPLES: usize = 100;
     const NUM_CHANNELS: usize = 3;
     let mut threshold: u16 = 2250;
-    let mut hysterese: u16 = 20;
-    let mut example: u16 = 100;
+    let mut watering_time: u16 = 20;
+    let mut backoff_time: u16 = 100;
     loop {
         let mut buf = [Sample::default(); { SAMPLES * NUM_CHANNELS }];
         let div = 48_000_000 / (100_000 * NUM_CHANNELS) - 1;
@@ -289,14 +295,14 @@ async fn values_from_adc(can: &'static CanBusMutex, adc_ressources: Adcs) {
         let (sum, count) = buf.iter().skip(1).step_by(NUM_CHANNELS).fold((0, 0), delta);
         let v_1 = sum / count;
         let r_1 = voltage_divider_resistance_upper(v_1, REFERENCE_RESISTOR_OHM);
-        let new_hysterese = linear_correction(1900, 2500, 100, 9000, r_1);
+        let new_watering_time = linear_correction(15, 90, 100, 9000, r_1);
         let (sum, count) = buf.iter().skip(2).step_by(NUM_CHANNELS).fold((0, 0), delta);
         let v_2 = sum / count;
         let r_2 = voltage_divider_resistance_upper(v_2, REFERENCE_RESISTOR_OHM);
-        let new_example = linear_correction(1900, 2500, 100, 9000, r_2);
+        let new_backoff_time = linear_correction(5, 30, 100, 9000, r_2);
         info!(
             "threshold: {}, {},| hysterese {}, {}| example: {}, {}",
-            new_threshold, v_0, new_hysterese, v_1, new_example, v_2
+            new_threshold, v_0, new_watering_time, v_1, new_backoff_time, v_2
         );
         if threshold.abs_diff(new_threshold) > ADC_JITTER_ALLOWANCE {
             threshold = new_threshold;
@@ -304,15 +310,17 @@ async fn values_from_adc(can: &'static CanBusMutex, adc_ressources: Adcs) {
             let mut can = can.lock().await;
             set_value(&mut can, Commands::Threshold, new_threshold, 1);
         }
-        if hysterese.abs_diff(new_hysterese) > ADC_JITTER_ALLOWANCE {
-            hysterese = new_hysterese;
+        if watering_time.abs_diff(new_watering_time) > ADC_JITTER_ALLOWANCE {
+            watering_time = new_watering_time;
             info!("have to update hysterese");
             let mut can = can.lock().await;
-            set_value(&mut can, Commands::Hysterese, new_hysterese, 1);
+            set_value(&mut can, Commands::WateringTime, new_watering_time, 1);
         }
-        if example.abs_diff(new_example) > ADC_JITTER_ALLOWANCE {
-            example = new_example;
-            info!("have to update example");
+        if backoff_time.abs_diff(new_backoff_time) > ADC_JITTER_ALLOWANCE {
+            backoff_time = new_backoff_time;
+            info!("have to update backoff_time");
+            let mut can = can.lock().await;
+            set_value(&mut can, Commands::BackoffTime, new_watering_time, 1);
         }
         Timer::after_millis(100).await;
     }

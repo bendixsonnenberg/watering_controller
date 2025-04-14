@@ -4,6 +4,7 @@ use embedded_can::Id;
 use embedded_can::*;
 use strum::FromRepr;
 /// most commands can be used with a remote frame to get the value, and with a data frame to set it
+/// there can be at most 7 commands with standard can
 #[derive(FromRepr, Debug, Eq, PartialEq, Copy, Clone)]
 #[repr(u8)]
 pub enum Commands {
@@ -11,6 +12,10 @@ pub enum Commands {
     Hysterese = 1,
     // can't set moisture
     Moisture = 2,
+    // the time the controller waters the plants in seconds
+    WateringTime = 3,
+    // minimum time to wait between waterings in minutes
+    BackoffTime = 4,
 }
 
 static COMMAND_MASK: u16 = 0b000_1111_1111;

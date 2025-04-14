@@ -1,28 +1,21 @@
 #![no_std]
 #![no_main]
 
-use core::{
-    cell::RefCell,
-    sync::atomic::{AtomicU16, Ordering},
-};
+use core::sync::atomic::{AtomicU16, Ordering};
 
 use assign_resources::assign_resources;
 use can::{
     filter::{self, Mask16},
-    Can, StandardId,
+    Can,
 };
 use can_contract::*;
-use core::future::Future;
 use defmt::*;
 use embassy_executor::Spawner;
-use embassy_stm32::{interrupt::InterruptExt, peripherals::ADC1};
+use embassy_stm32::interrupt::InterruptExt;
 use embassy_stm32::{rcc::Sysclk, time::Hertz, *};
-use embassy_time::{Instant, Timer};
-use embedded_hal_bus::spi::ExclusiveDevice;
-use embedded_sdmmc::{self, sdcard::AcquireOpts, SdCard, VolumeIdx, VolumeManager};
+use embassy_time::Timer;
 use gpio::{Level, Output, Speed};
 
-use time_source::DummyTimeSource;
 use {defmt_rtt as _, panic_probe as _};
 mod time_source;
 // define constants
@@ -49,15 +42,20 @@ assign_resources! {
         ss: PA9
     }
 }
+#[derive(Default)]
 struct SharedData {
     threshold: AtomicU16,
     hysterese: AtomicU16,
     moisture: AtomicU16,
+    watering_time: AtomicU16,
+    backoff_time: AtomicU16,
 }
 static SHARED: SharedData = SharedData {
     threshold: AtomicU16::new(0),
     hysterese: AtomicU16::new(0),
     moisture: AtomicU16::new(0),
+    watering_time: AtomicU16::new(30),
+    backoff_time: AtomicU16::new(15),
 };
 bind_interrupts!(struct Irqs {
     ADC1_2 => adc::InterruptHandler<peripherals::ADC1>;
@@ -117,10 +115,10 @@ async fn handle_valve(resources: ValveResources) {
             // again
             info!("watering now");
             valve_pin.set_high();
-            Timer::after_secs(30).await;
+            Timer::after_secs(SHARED.watering_time.load(Ordering::Relaxed) as u64).await;
             valve_pin.set_low();
             info!("waiting for backoff");
-            Timer::after_secs(15 * 60).await;
+            Timer::after_secs(SHARED.backoff_time.load(Ordering::Relaxed) as u64 * 60).await;
         }
         Timer::after_millis(100).await;
     }
@@ -200,6 +198,38 @@ async fn handle_modify_threshold(can_resources: CanResources) {
                         send_data_over_can(
                             &mut can,
                             SHARED.moisture.load(Ordering::Relaxed),
+                            command,
+                            0,
+                            dev_id,
+                        )
+                        .await;
+                    }
+                }
+                Commands::BackoffTime => {
+                    if !frame.header().rtr() {
+                        SHARED
+                            .backoff_time
+                            .store(data.expect("not rtr should exists"), Ordering::Relaxed);
+                    } else {
+                        send_data_over_can(
+                            &mut can,
+                            SHARED.backoff_time.load(Ordering::Relaxed),
+                            command,
+                            0,
+                            dev_id,
+                        )
+                        .await;
+                    }
+                }
+                Commands::WateringTime => {
+                    if !frame.header().rtr() {
+                        SHARED
+                            .watering_time
+                            .store(data.expect("not rtr should exists"), Ordering::Relaxed);
+                    } else {
+                        send_data_over_can(
+                            &mut can,
+                            SHARED.watering_time.load(Ordering::Relaxed),
                             command,
                             0,
                             dev_id,
