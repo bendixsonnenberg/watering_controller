@@ -19,3 +19,7 @@ can_contract/Cargo.lock
 rp-controller/assets/ferris.raw
 rp-controller/Cargo.lock
 moisture_sensor_code/out
+hardware/sensor/moisture_sensor/jlcpcb
+hardware/sensor/moisture_sensor/moisture_sensor-backups
+hardware/sensor/moisture_sensor/fp-info-cache
+hardware/sensor/moisture_sensor/moisture_sensor.kicad_sch-bak
