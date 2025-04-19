@@ -22,8 +22,8 @@ use embassy_rp::pio::{InterruptHandler, Pio};
 use embassy_rp::spi::{Blocking, Spi};
 use embassy_rp::usb::Driver;
 use embassy_rp::{bind_interrupts, spi};
+use embassy_sync::blocking_mutex::NoopMutex;
 use embassy_sync::blocking_mutex::raw::NoopRawMutex;
-use embassy_sync::blocking_mutex::{NoopMutex};
 use embassy_time::{Delay, Duration, Instant, Ticker, Timer};
 use embedded_can::Frame;
 use embedded_hal_bus::spi::ExclusiveDevice;
@@ -372,6 +372,7 @@ async fn get_value(can: &mut CanBus, command: Commands, dev_id: u8) -> Option<u1
 // measured resistance is the resistor to voltage
 fn voltage_divider_resistance_upper(mesurement: u32, known: u16) -> u16 {
     let alpha = known as u32 * ADC_MAX as u32;
+    // prevent division by 0
     let mesurement = mesurement.max(1);
     let division = (alpha) / mesurement;
     (division as u16) - known
@@ -383,8 +384,13 @@ fn linear_correction(
     in_max: u16,
     input: u16,
 ) -> u16 {
-    let relative = (input.saturating_sub(in_min)) / (in_max - in_min);
-    ((corrected_max - corrected_min) * relative + corrected_min).clamp(corrected_min, corrected_max)
+    let m_upper = corrected_max.saturating_sub(corrected_min);
+    let m_lower = in_max.saturating_sub(in_min).max(1);
+    let b = m_upper.saturating_mul(in_min).saturating_div(corrected_min);
+    input
+        .saturating_mul(m_upper)
+        .saturating_div(m_lower)
+        .saturating_sub(b)
 }
 async fn init_can(can_resources: SpiCan) -> CanBus {
     info!("initiating can");
