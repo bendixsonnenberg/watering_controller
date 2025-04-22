@@ -216,29 +216,40 @@ async fn sd_card_log(can: &'static CanBusMutex, mut sd_card_resources: SpiSdcard
             continue;
         };
 
-        let Ok(_) =
-            log_file.write(b"time, moisture, threshold, hysterese, backoff, wateringTime\n")
+        let Ok(_) = log_file
+            .write(b"time, moisture1, moisture2, threshold, hysterese, backoff, wateringTime\n")
         else {
             continue;
         };
         let Ok(_) = log_file.flush() else {
             continue;
         };
-        let mut ticker = Ticker::every(Duration::from_secs_floor(5));
+        let mut ticker = Ticker::every(Duration::from_secs_floor(30));
         loop {
-            let mut can = can.lock().await;
             let time = Instant::now().as_secs();
-            let moisture = get_value(&mut can, Commands::Moisture, 1).await;
-            let threshold = get_value(&mut can, Commands::Threshold, 1).await;
-            let hysterese = get_value(&mut can, Commands::Hysterese, 1).await;
-            let backoff = get_value(&mut can, Commands::BackoffTime, 1).await;
-            let watering_time = get_value(&mut can, Commands::WateringTime, 1).await;
+            let moisture1;
+            let moisture2;
+            let threshold;
+            let hysterese;
+            let backoff;
+            let watering_time;
+            // we need to drop can after using it
+            {
+                let mut can = can.lock().await;
+                moisture1 = get_value(&mut can, Commands::Moisture, 1).await;
+                moisture2 = get_value(&mut can, Commands::Moisture, 2).await;
+                threshold = get_value(&mut can, Commands::Threshold, 1).await;
+                hysterese = get_value(&mut can, Commands::Hysterese, 1).await;
+                backoff = get_value(&mut can, Commands::BackoffTime, 1).await;
+                watering_time = get_value(&mut can, Commands::WateringTime, 1).await;
+            }
             let mut buffer: String<32> = String::new();
             let Ok(_) = core::writeln!(
                 &mut buffer,
-                "{}, {}, {}, {}, {}, {}",
+                "{}, {}, {}, {}, {}, {}, {}",
                 time,
-                moisture.unwrap_or(0),
+                moisture1.unwrap_or(0),
+                moisture2.unwrap_or(0),
                 threshold.unwrap_or(0),
                 hysterese.unwrap_or(0),
                 backoff.unwrap_or(0),
@@ -268,18 +279,22 @@ async fn values_from_adc(can: &'static CanBusMutex, adc_ressources: Adcs) {
     let channel1 = Channel::new_pin(adc_ressources.pin1, embassy_rp::gpio::Pull::None);
     let channel2 = Channel::new_pin(adc_ressources.pin2, embassy_rp::gpio::Pull::None);
 
-    let mut channels = [channel0, channel1, channel2];
+    let mut channels = [channel1, channel2, channel0];
     const SAMPLES: usize = 100;
     const NUM_CHANNELS: usize = 3;
     let mut threshold: u16 = 2250;
     let mut watering_time: u16 = 20;
     let mut backoff_time: u16 = 100;
+    let mut old_r0 = 5000;
+    let mut old_r1 = 5000;
+    let mut old_r2 = 5000;
     loop {
         let mut buf = [Sample::default(); { SAMPLES * NUM_CHANNELS }];
         let div = 48_000_000 / (100_000 * NUM_CHANNELS) - 1;
 
         adc.read_many_multichannel_raw(&mut channels, &mut buf, div as u16, dma.reborrow())
             .await;
+        info!("read adc");
         let delta = |(sum, count): (u32, u32), value: &Sample| {
             if value.good() {
                 (sum + value.value() as u32, count + 1)
@@ -291,36 +306,43 @@ async fn values_from_adc(can: &'static CanBusMutex, adc_ressources: Adcs) {
         let (sum, count) = buf.iter().step_by(NUM_CHANNELS).fold((0, 0), delta);
         let v_0 = sum / count;
         let r_0 = voltage_divider_resistance_upper(v_0, REFERENCE_RESISTOR_OHM);
-        let new_threshold = linear_correction(1900, 2500, 100, 9000, r_0);
+        let new_threshold = linear_correction(2500, 1500, 100, 10100, r_0);
         let (sum, count) = buf.iter().skip(1).step_by(NUM_CHANNELS).fold((0, 0), delta);
         let v_1 = sum / count;
         let r_1 = voltage_divider_resistance_upper(v_1, REFERENCE_RESISTOR_OHM);
-        let new_watering_time = linear_correction(15, 90, 100, 9000, r_1);
+        let new_watering_time = linear_correction(15, 90, 100, 10100, r_1);
         let (sum, count) = buf.iter().skip(2).step_by(NUM_CHANNELS).fold((0, 0), delta);
         let v_2 = sum / count;
         let r_2 = voltage_divider_resistance_upper(v_2, REFERENCE_RESISTOR_OHM);
-        let new_backoff_time = linear_correction(5, 30, 100, 9000, r_2);
+        let new_backoff_time = linear_correction(5, 30, 100, 10100, r_2);
         info!(
-            "threshold: {}, {},| hysterese {}, {}| example: {}, {}",
-            new_threshold, v_0, new_watering_time, v_1, new_backoff_time, v_2
+            "threshold: {}, {},{},| watering_time: {}, {}, {}| backoff_time: {}, {}, {}",
+            new_threshold, v_0, r_0, new_watering_time, v_1, r_1, new_backoff_time, v_2, r_2
         );
-        if threshold.abs_diff(new_threshold) > ADC_JITTER_ALLOWANCE {
+        if r_0.abs_diff(old_r0) > ADC_JITTER_ALLOWANCE {
+            old_r0 = r_0;
             threshold = new_threshold;
             info!("have to update threshold");
             let mut can = can.lock().await;
+            info!("got can");
             set_value(&mut can, Commands::Threshold, new_threshold, 1);
+            set_value(&mut can, Commands::Threshold, new_threshold, 2);
         }
-        if watering_time.abs_diff(new_watering_time) > ADC_JITTER_ALLOWANCE {
+        if r_1.abs_diff(old_r1) > ADC_JITTER_ALLOWANCE {
+            old_r1 = r_1;
             watering_time = new_watering_time;
-            info!("have to update hysterese");
+            info!("have to update watering time");
             let mut can = can.lock().await;
             set_value(&mut can, Commands::WateringTime, new_watering_time, 1);
+            set_value(&mut can, Commands::WateringTime, new_watering_time, 2);
         }
-        if backoff_time.abs_diff(new_backoff_time) > ADC_JITTER_ALLOWANCE {
+        if r_2.abs_diff(old_r2) > ADC_JITTER_ALLOWANCE {
+            old_r2 = r_2;
             backoff_time = new_backoff_time;
             info!("have to update backoff_time");
             let mut can = can.lock().await;
-            set_value(&mut can, Commands::BackoffTime, new_watering_time, 1);
+            set_value(&mut can, Commands::BackoffTime, new_backoff_time, 1);
+            set_value(&mut can, Commands::BackoffTime, new_backoff_time, 2);
         }
         Timer::after_millis(100).await;
     }
@@ -349,7 +371,7 @@ async fn get_value(can: &mut CanBus, command: Commands, dev_id: u8) -> Option<u1
     let frame = CanFrame::new_remote(id, 3)?;
     match can.send_message(frame) {
         Ok(_) => {
-            info!("sent can message")
+            trace!("sent can message")
         }
         Err(e) => {
             info!("{:?}", e);
@@ -384,14 +406,39 @@ fn linear_correction(
     in_max: u16,
     input: u16,
 ) -> u16 {
+    // Ensure the input is within the specified range
+    if input < in_min {
+        return corrected_min;
+    } else if input > in_max {
+        return corrected_max;
+    }
+
+    // Calculate the corrected value using linear interpolation
+    let slope = (corrected_max as f32 - corrected_min as f32) / (in_max as f32 - in_min as f32);
+    let corrected_value = slope * (input as f32 - in_min as f32) + corrected_min as f32;
+
+    // Convert the result back to u16 and return
+    corrected_value as u16
+}
+/*
+fn linear_correction(
+    corrected_min: u16,
+    corrected_max: u16,
+    in_min: u16,
+    in_max: u16,
+    input: u16,
+) -> u16 {
     let m_upper = corrected_max.saturating_sub(corrected_min);
     let m_lower = in_max.saturating_sub(in_min).max(1);
     let b = m_upper.saturating_mul(in_min).saturating_div(corrected_min);
-    input
-        .saturating_mul(m_upper)
-        .saturating_div(m_lower)
-        .saturating_sub(b)
+    info!("m_0: {}, m_1: {}, b: {}", m_upper, m_lower, b);
+    let upper: u32 = (input as u32).saturating_mul(m_upper as u32);
+    let lower = upper.saturating_div(m_lower as u32);
+    let res = lower.saturating_sub(b as u32);
+    info!("upper: {}, lower: {}, res: {}", upper, lower, res);
+    res as u16
 }
+*/
 async fn init_can(can_resources: SpiCan) -> CanBus {
     info!("initiating can");
     static SPI_CAN_BUS: StaticCell<NoopMutex<RefCell<Spi<SPI1, Blocking>>>> = StaticCell::new();

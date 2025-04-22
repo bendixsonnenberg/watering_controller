@@ -23,6 +23,7 @@ const LOG_INTERVAL: u64 = 5; // at n*LOG_INTERVAL seconds a log entry is written
 const CAN_BITRATE: u32 = 125_000; // bitrate for can bus. We are not transfering large amounts of
                                   // data ,so lets keep this low
 
+const DEV_ID: u8 = 1; // will later be determined by shorted pins
 assign_resources! {
     valve_control: ValveResources {
         adc: ADC1,
@@ -108,6 +109,7 @@ async fn handle_valve(resources: ValveResources) {
     loop {
         let v = adc.read(&mut moisture_level_pin).await;
         trace!("Sample: {}", v);
+        SHARED.moisture.store(v, Ordering::Relaxed);
 
         let threshold = SHARED.threshold.load(Ordering::Relaxed);
         if v > threshold - hystere {
@@ -129,7 +131,7 @@ async fn handle_modify_threshold(can_resources: CanResources) {
     let mut can = init_can(can_resources).await;
     trace!("can initiated");
 
-    let dev_id = 1;
+    let dev_id = get_dev_id().await;
     // send_data_over_can(&mut can, 16, Commands::Threshold, dev_id).await;
 
     loop {
@@ -206,6 +208,7 @@ async fn handle_modify_threshold(can_resources: CanResources) {
                     }
                 }
                 Commands::BackoffTime => {
+                    info!("BackoffTime: {:?}", data);
                     if !frame.header().rtr() {
                         SHARED
                             .backoff_time
@@ -222,6 +225,7 @@ async fn handle_modify_threshold(can_resources: CanResources) {
                     }
                 }
                 Commands::WateringTime => {
+                    info!("WateringTime: {:?}", data);
                     if !frame.header().rtr() {
                         SHARED
                             .watering_time
@@ -260,10 +264,13 @@ async fn send_data_over_can(
     let r = can.write(&frame).await;
 }
 
+async fn get_dev_id() -> u8 {
+    DEV_ID
+}
 async fn init_can(resourses: CanResources) -> Can<'static> {
     // first we define the filter, which will accept all messages directed at this device
     let mask = MASK;
-    let id = get_filter_from_id(1); // id is 8 bit, this will later be determined by dip switches
+    let id = get_filter_from_id(get_dev_id().await); // id is 8 bit, this will later be determined by dip switches
     let mask: Mask16 = Mask16::frames_with_std_id(id, mask);
 
     let mut can = Can::new(resourses.can, resourses.can_rx, resourses.can_tx, Irqs);
