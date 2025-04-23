@@ -243,7 +243,9 @@ async fn sd_card_log(can: &'static CanBusMutex, mut sd_card_resources: SpiSdcard
                 backoff = get_value(&mut can, Commands::BackoffTime, 1).await;
                 watering_time = get_value(&mut can, Commands::WateringTime, 1).await;
             }
-            let mut buffer: String<32> = String::new();
+            // N needs to be large enough to hold all possible content written in the following
+            // line
+            let mut buffer: String<64> = String::new();
             let Ok(_) = core::writeln!(
                 &mut buffer,
                 "{}, {}, {}, {}, {}, {}, {}",
