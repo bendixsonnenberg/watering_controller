@@ -9,6 +9,7 @@ use core::cell::RefCell;
 use core::panic;
 
 use assign_resources::*;
+use bitmaps::Bitmap;
 use can_contract::*;
 use core::fmt::Write;
 use cyw43_pio::{DEFAULT_CLOCK_DIVIDER, PioSpi};
@@ -32,7 +33,7 @@ use heapless::String;
 use log::*;
 use mcp2515::frame::CanFrame;
 use mcp2515::*;
-use static_cell::StaticCell;
+use static_cell::{ConstStaticCell, StaticCell};
 use {defmt_rtt as _, panic_probe as _};
 const REFERENCE_RESISTOR_OHM: u16 = 100;
 const ADC_JITTER_ALLOWANCE: u16 = 100; // the amount the adc reading has to differ for it to be
@@ -148,6 +149,10 @@ async fn main(spawner: Spawner) {
     let can = init_can(r.spi_can).await;
 
     let can = CAN.init(embassy_sync::mutex::Mutex::new(can));
+
+    // setting up a bitmap of existing sensors
+    static SENSORS: StaticCell<RefCell<Bitmap<256>>> = StaticCell::new();
+    let sensors = SENSORS.init(RefCell::new(Bitmap::<256>::new()));
 
     unwrap!(spawner.spawn(values_from_adc(can, r.adcs)));
     unwrap!(spawner.spawn(sd_card_log(can, r.spi_sdcard)));
