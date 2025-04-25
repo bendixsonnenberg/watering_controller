@@ -192,9 +192,12 @@ async fn sd_card_log(can: &'static CanBusMutex, mut sd_card_resources: SpiSdcard
             config,
         );
         let cs = Output::new(sd_card_resources.cs.reborrow(), Level::High);
+        info!("got spi");
         let spi_dev = ExclusiveDevice::new_no_delay(spi, cs);
+        info!("got spi_dev");
 
         let sdcard = SdCard::new(spi_dev, embassy_time::Delay);
+        info!("got sd_card");
 
         let mut volume_mgr = VolumeManager::new(sdcard, DummyTimesource());
 
@@ -245,6 +248,8 @@ async fn sd_card_log(can: &'static CanBusMutex, mut sd_card_resources: SpiSdcard
             }
             // N needs to be large enough to hold all possible content written in the following
             // line
+            // len(time) + 4 (moist1) + 4 (moist2) + 4(threshold) + 1 (hyst) + 2(backoff) +
+            // 2(watering_time) + 2*6(, ) = len(time) + 29
             let mut buffer: String<64> = String::new();
             let Ok(_) = core::writeln!(
                 &mut buffer,
@@ -267,6 +272,7 @@ async fn sd_card_log(can: &'static CanBusMutex, mut sd_card_resources: SpiSdcard
             };
             ticker.next().await;
         }
+        error!("failed at logging");
         Timer::after_secs(60).await;
     }
 }
