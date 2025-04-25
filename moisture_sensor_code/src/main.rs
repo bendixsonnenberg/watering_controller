@@ -22,6 +22,7 @@ mod time_source;
 const LOG_INTERVAL: u64 = 5; // at n*LOG_INTERVAL seconds a log entry is written
 const CAN_BITRATE: u32 = 125_000; // bitrate for can bus. We are not transfering large amounts of
                                   // data ,so lets keep this low
+const CONTROLLER_ID: u8 = 0;
 
 const DEV_ID: u8 = 1; // will later be determined by shorted pins
 assign_resources! {
@@ -159,7 +160,7 @@ async fn handle_modify_threshold(can_resources: CanResources) {
                             &mut can,
                             SHARED.threshold.load(Ordering::Relaxed),
                             command,
-                            0,
+                            CONTROLLER_ID,
                             dev_id,
                         )
                         .await;
@@ -180,7 +181,7 @@ async fn handle_modify_threshold(can_resources: CanResources) {
                             &mut can,
                             SHARED.hysterese.load(Ordering::Relaxed),
                             command,
-                            0,
+                            CONTROLLER_ID,
                             dev_id,
                         )
                         .await;
@@ -201,7 +202,7 @@ async fn handle_modify_threshold(can_resources: CanResources) {
                             &mut can,
                             SHARED.moisture.load(Ordering::Relaxed),
                             command,
-                            0,
+                            CONTROLLER_ID,
                             dev_id,
                         )
                         .await;
@@ -218,7 +219,7 @@ async fn handle_modify_threshold(can_resources: CanResources) {
                             &mut can,
                             SHARED.backoff_time.load(Ordering::Relaxed),
                             command,
-                            0,
+                            CONTROLLER_ID,
                             dev_id,
                         )
                         .await;
@@ -235,10 +236,21 @@ async fn handle_modify_threshold(can_resources: CanResources) {
                             &mut can,
                             SHARED.watering_time.load(Ordering::Relaxed),
                             command,
-                            0,
+                            CONTROLLER_ID,
                             dev_id,
                         )
                         .await;
+                    }
+                }
+                Commands::Announce => {
+                    info!("Received announce");
+                    if !frame.header().rtr() {
+                        // some other sensor sent a announcement with our device id.
+                        // just
+                    } else {
+                        send_data_over_can(&mut can, 0, command, CONTROLLER_ID, dev_id).await;
+                        // help with potential conflicts
+                        send_data_over_can(&mut can, 0, command, dev_id, dev_id).await;
                     }
                 }
             }
@@ -268,9 +280,10 @@ async fn get_dev_id() -> u8 {
     DEV_ID
 }
 async fn init_can(resourses: CanResources) -> Can<'static> {
+    let dev_id = get_dev_id().await;
     // first we define the filter, which will accept all messages directed at this device
     let mask = MASK;
-    let id = get_filter_from_id(get_dev_id().await); // id is 8 bit, this will later be determined by dip switches
+    let id = get_filter_from_id(dev_id); // id is 8 bit, this will later be determined by dip switches
     let mask: Mask16 = Mask16::frames_with_std_id(id, mask);
 
     let mut can = Can::new(resourses.can, resourses.can_rx, resourses.can_tx, Irqs);
@@ -285,5 +298,7 @@ async fn init_can(resourses: CanResources) -> Can<'static> {
         .set_loopback(false)
         .set_silent(false);
     can.enable().await;
+    send_data_over_can(&mut can, 0, Commands::Announce, CONTROLLER_ID, dev_id).await;
+    send_data_over_can(&mut can, 0, Commands::Announce, dev_id, dev_id).await;
     can
 }

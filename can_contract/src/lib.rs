@@ -16,6 +16,9 @@ pub enum Commands {
     WateringTime = 3,
     // minimum time to wait between waterings in minutes
     BackoffTime = 4,
+    // new device adding itself, the controller is started, every id is tested, if new sensor is
+    // added announce itself to the world. If a new device is added and its id conflicts TODO
+    Announce = 5,
 }
 
 static COMMAND_MASK: u16 = 0b000_1111_1111;
