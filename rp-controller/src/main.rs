@@ -50,15 +50,28 @@ type CanBus = MCP2515<
         Output<'static>,
     >,
 >;
-type CanBusMutex =
-    embassy_sync::mutex::Mutex<embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex, CanBus>;
 
 enum CanData {
     Remote,
     Data(can_contract::CanData),
 }
+type CanChannel =
+    embassy_sync::channel::Channel<ThreadModeRawMutex, (Commands, can_contract::DevId, CanData), 3>;
+type CanSender = embassy_sync::channel::Sender<
+    'static,
+    ThreadModeRawMutex,
+    (Commands, can_contract::DevId, CanData),
+    3,
+>;
+type CanReceiver = embassy_sync::channel::Receiver<
+    'static,
+    ThreadModeRawMutex,
+    (Commands, can_contract::DevId, CanData),
+    3,
+>;
 /// type that contains all information for sending frame;
 type CanChannelData = (Commands, DevId, CanData);
+type SensorBitmap = embassy_sync::blocking_mutex::Mutex<ThreadModeRawMutex, RefCell<Bitmap<256>>>;
 // Program metadata for `picotool info`.
 // This isn't needed, but it's recommended to have these minimal entries.
 #[unsafe(link_section = ".bi_entries")]
@@ -156,38 +169,37 @@ async fn main(spawner: Spawner) {
     control
         .set_power_management(cyw43::PowerManagementMode::PowerSave)
         .await;
-    static CAN: StaticCell<CanBusMutex> = StaticCell::new();
 
     let can = init_can(r.spi_can).await;
 
-    static can_channel: embassy_sync::channel::Channel<
-        ThreadModeRawMutex,
-        (Commands, can_contract::DevId, CanData),
-        3,
-    > = embassy_sync::channel::Channel::<
-        ThreadModeRawMutex,
-        (Commands, can_contract::DevId, CanData),
-        3,
-    >::new();
+    static CAN_CHANNEL: CanChannel = CanChannel::new();
 
-    let can_rx = can_channel.receiver();
-    let can_tx = can_channel.sender();
+    let can_rx = CAN_CHANNEL.receiver();
+    let can_tx = CAN_CHANNEL.sender();
     // setting up a bitmap of existing sensors
-    static SENSORS: StaticCell<RefCell<Bitmap<256>>> = StaticCell::new();
-    let sensors = SENSORS.init(RefCell::new(Bitmap::<256>::new()));
+    static SENSORS: StaticCell<SensorBitmap> = StaticCell::new();
+    let sensors = SENSORS.init(embassy_sync::blocking_mutex::Mutex::new(RefCell::new(
+        Bitmap::<256>::new(),
+    )));
 
     unwrap!(spawner.spawn(can_task(
         can,
         Input::new(r.can_int.int, Pull::Up),
+        sensors,
         can_tx,
         can_rx
     )));
+
+    // populate the bitmap,
+    // we want to do this before the other tasks are spawned to reduce the chance of the channels
+    // overflowing
+    poll_sensors(can_tx).await;
+
     unwrap!(spawner.spawn(values_from_adc(can_tx, r.adcs)));
-    unwrap!(spawner.spawn(sd_card_log(can_tx, can_rx, r.spi_sdcard)));
+    unwrap!(spawner.spawn(sd_card_log(can_tx, can_rx, sensors, r.spi_sdcard)));
 
     let delay = Duration::from_millis(250);
     loop {
-        // TODO: add respawning the sd card task, if it terminated
         control.gpio_set(0, true).await;
         Timer::after(delay).await;
 
@@ -213,8 +225,9 @@ impl embedded_sdmmc::TimeSource for DummyTimesource {
 
 #[embassy_executor::task]
 async fn sd_card_log(
-    mut can_tx: embassy_sync::channel::Sender<'static, ThreadModeRawMutex, CanChannelData, 3>,
-    mut can_rx: embassy_sync::channel::Receiver<'static, ThreadModeRawMutex, CanChannelData, 3>,
+    mut can_tx: CanSender,
+    mut can_rx: CanReceiver,
+    sensors: &'static SensorBitmap,
     mut sd_card_resources: SpiSdcard,
 ) {
     // this overarching loop enables the sd card to be inserted later
@@ -275,13 +288,18 @@ async fn sd_card_log(
             let watering_time;
             // we need to drop can after using it
             {
-                moisture1 = get_value(&mut can_tx, &mut can_rx, Commands::Moisture, 1).await;
-                moisture2 = get_value(&mut can_tx, &mut can_rx, Commands::Moisture, 2).await;
-                threshold = get_value(&mut can_tx, &mut can_rx, Commands::Threshold, 1).await;
-                hysterese = get_value(&mut can_tx, &mut can_rx, Commands::Hysterese, 1).await;
-                backoff = get_value(&mut can_tx, &mut can_rx, Commands::BackoffTime, 1).await;
+                moisture1 =
+                    get_value(&mut can_tx, &mut can_rx, Commands::Moisture, 1, sensors).await;
+                moisture2 =
+                    get_value(&mut can_tx, &mut can_rx, Commands::Moisture, 2, sensors).await;
+                threshold =
+                    get_value(&mut can_tx, &mut can_rx, Commands::Threshold, 1, sensors).await;
+                hysterese =
+                    get_value(&mut can_tx, &mut can_rx, Commands::Hysterese, 1, sensors).await;
+                backoff =
+                    get_value(&mut can_tx, &mut can_rx, Commands::BackoffTime, 1, sensors).await;
                 watering_time =
-                    get_value(&mut can_tx, &mut can_rx, Commands::WateringTime, 1).await;
+                    get_value(&mut can_tx, &mut can_rx, Commands::WateringTime, 1, sensors).await;
             }
             // N needs to be large enough to hold all possible content written in the following
             // line
@@ -313,14 +331,24 @@ async fn sd_card_log(
         Timer::after_secs(60).await;
     }
 }
+
+async fn poll_sensors(can_tx: CanSender) {
+    for i in 1..DevId::MAX {
+        // id 0 is the controller
+        // ask every id if it exists
+        can_tx.send((Commands::Announce, i, CanData::Remote)).await;
+    }
+}
+
 /// handles all the can related stuff, mainly sending messages and routing incoming messages to the
 /// correct receiver
 #[embassy_executor::task]
 async fn can_task(
     mut can: CanBus,
     mut can_interrupt_pin: Input<'static>,
-    receive_channel: embassy_sync::channel::Sender<'static, ThreadModeRawMutex, CanChannelData, 3>,
-    send_channel: embassy_sync::channel::Receiver<'static, ThreadModeRawMutex, CanChannelData, 3>,
+    sensors: &'static SensorBitmap,
+    receive_channel: CanSender,
+    send_channel: CanReceiver,
 ) {
     loop {
         let receive_future = can_interrupt_pin.wait_for_falling_edge();
@@ -334,7 +362,11 @@ async fn can_task(
                     continue;
                 };
                 match frame {
-                    (Commands::Announce, Some(_dev_id), _) => todo!("handle announce"),
+                    (Commands::Announce, Some(dev_id), _) => sensors.lock(|sensors| {
+                        // tell everyone that this sensor is connected
+                        let mut s = sensors.borrow_mut();
+                        s.set(dev_id as usize, true);
+                    }),
                     (command, Some(dev_id), Some(data)) => {
                         receive_channel.try_send((command, dev_id, CanData::Data(data)));
                     }
@@ -344,6 +376,7 @@ async fn can_task(
                     (_, _, _) => continue,
                 }
             }
+            // transmit this message
             select::Either::Second((command, dev_id, data)) => {
                 let Some(id) = can_contract::id_from_command_and_dev_id(command, dev_id) else {
                     continue;
@@ -371,10 +404,7 @@ async fn can_task(
     }
 }
 #[embassy_executor::task]
-async fn values_from_adc(
-    mut can_tx: embassy_sync::channel::Sender<'static, ThreadModeRawMutex, CanChannelData, 3>,
-    adc_ressources: Adcs,
-) {
+async fn values_from_adc(mut can_tx: CanSender, adc_ressources: Adcs) {
     info!("starting adcs");
     let mut adc = Adc::new(adc_ressources.adc, Irqs, embassy_rp::adc::Config::default());
     let mut dma = adc_ressources.dma;
@@ -445,7 +475,7 @@ async fn values_from_adc(
 
 // can set and get values
 async fn set_value(
-    can_tx: &mut embassy_sync::channel::Sender<'static, ThreadModeRawMutex, CanChannelData, 3>,
+    can_tx: &mut CanSender,
     command: Commands,
     data: can_contract::CanData,
     dev_id: can_contract::DevId,
@@ -453,10 +483,11 @@ async fn set_value(
     can_tx.send((command, dev_id, CanData::Data(data))).await
 }
 async fn get_value(
-    can_tx: &mut embassy_sync::channel::Sender<'static, ThreadModeRawMutex, CanChannelData, 3>,
-    can_rx: &mut embassy_sync::channel::Receiver<'static, ThreadModeRawMutex, CanChannelData, 3>,
+    can_tx: &mut CanSender,
+    can_rx: &mut CanReceiver,
     command: Commands,
     dev_id: u8,
+    sensors: &SensorBitmap,
 ) -> Option<can_contract::CanData> {
     can_tx.send((command, dev_id, CanData::Remote)).await;
 
@@ -465,6 +496,9 @@ async fn get_value(
         .with_timeout(Duration::from_millis(500))
         .await
     else {
+        // the sensor is not responding, remove it from the list of active sensors
+        //TODO: add error reporting
+        sensors.lock(|sensor| sensor.borrow_mut().set(dev_id as usize, false));
         return None;
     };
 
