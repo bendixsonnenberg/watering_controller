@@ -35,7 +35,7 @@ use mcp2515::*;
 use static_cell::StaticCell;
 use {defmt_rtt as _, panic_probe as _};
 const REFERENCE_RESISTOR_OHM: u16 = 100;
-const ADC_JITTER_ALLOWANCE: u16 = 100; // the amount the adc reading has to differ for it to be
+const ADC_JITTER_ALLOWANCE: u16 = 200; // the amount the adc reading has to differ for it to be
 // considred changed
 const ADC_MAX: u16 = 4096;
 const CONTROLLER_DEV_ID: u8 = 0;
@@ -182,6 +182,7 @@ impl embedded_sdmmc::TimeSource for DummyTimesource {
 async fn sd_card_log(can: &'static CanBusMutex, mut sd_card_resources: SpiSdcard) {
     // this overarching loop enables the sd card to be inserted later
     loop {
+        Timer::after_secs(1).await;
         let mut config = spi::Config::default();
         config.frequency = 400_000; // for initilization the frequency has to be below 400khz
         let spi = Spi::new_blocking(
@@ -193,27 +194,34 @@ async fn sd_card_log(can: &'static CanBusMutex, mut sd_card_resources: SpiSdcard
         );
         let cs = Output::new(sd_card_resources.cs.reborrow(), Level::High);
         info!("got spi");
+        Timer::after_millis(500).await;
         let spi_dev = ExclusiveDevice::new_no_delay(spi, cs);
         info!("got spi_dev");
+        Timer::after_millis(500).await;
 
         let sdcard = SdCard::new(spi_dev, embassy_time::Delay);
         info!("got sd_card");
+        Timer::after_millis(500).await;
 
         let mut volume_mgr = VolumeManager::new(sdcard, DummyTimesource());
+        info!("got volume_mgr");
+        Timer::after_millis(500).await;
 
         let Ok(mut vol0) = volume_mgr.open_volume(VolumeIdx(0)) else {
             error!("Failed opening volume, not logging anymore, retrying");
             continue;
         };
+        info!("got volume");
 
         let Ok(mut root_dir) = vol0.open_root_dir() else {
             error!("Failed opening dir");
             continue;
         };
+        info!("got dir");
 
         let Ok(mut log_file) = root_dir.open_file_in_dir(
             "log_file.csv",
-            embedded_sdmmc::Mode::ReadWriteCreateOrTruncate,
+            embedded_sdmmc::Mode::ReadWriteCreateOrAppend,
         ) else {
             error!("failed opening file");
             continue;
@@ -227,7 +235,7 @@ async fn sd_card_log(can: &'static CanBusMutex, mut sd_card_resources: SpiSdcard
         let Ok(_) = log_file.flush() else {
             continue;
         };
-        let mut ticker = Ticker::every(Duration::from_secs_floor(30));
+        let mut ticker = Ticker::every(Duration::from_secs_floor(5));
         loop {
             let time = Instant::now().as_secs();
             let moisture1;
@@ -264,10 +272,13 @@ async fn sd_card_log(can: &'static CanBusMutex, mut sd_card_resources: SpiSdcard
             ) else {
                 break;
             };
-            let Ok(_) = log_file.write(buffer.as_bytes()) else {
+            info!("LOG: {}", buffer.clone());
+            let Ok(_) = log_file.write(buffer.clone().as_bytes()) else {
+                info!("failed writing");
                 break;
             };
             let Ok(_) = log_file.flush() else {
+                info!("failed flushing");
                 break;
             };
             ticker.next().await;
@@ -290,9 +301,6 @@ async fn values_from_adc(can: &'static CanBusMutex, adc_ressources: Adcs) {
     let mut channels = [channel1, channel2, channel0];
     const SAMPLES: usize = 100;
     const NUM_CHANNELS: usize = 3;
-    let mut threshold: u16 = 2250;
-    let mut watering_time: u16 = 20;
-    let mut backoff_time: u16 = 100;
     let mut old_r0 = 5000;
     let mut old_r1 = 5000;
     let mut old_r2 = 5000;
@@ -302,7 +310,7 @@ async fn values_from_adc(can: &'static CanBusMutex, adc_ressources: Adcs) {
 
         adc.read_many_multichannel_raw(&mut channels, &mut buf, div as u16, dma.reborrow())
             .await;
-        info!("read adc");
+        trace!("read adc");
         let delta = |(sum, count): (u32, u32), value: &Sample| {
             if value.good() {
                 (sum + value.value() as u32, count + 1)
@@ -314,7 +322,7 @@ async fn values_from_adc(can: &'static CanBusMutex, adc_ressources: Adcs) {
         let (sum, count) = buf.iter().step_by(NUM_CHANNELS).fold((0, 0), delta);
         let v_0 = sum / count;
         let r_0 = voltage_divider_resistance_upper(v_0, REFERENCE_RESISTOR_OHM);
-        let new_threshold = linear_correction(2500, 1500, 100, 10100, r_0);
+        let new_threshold = linear_correction(2000, 1000, 100, 4000, r_0);
         let (sum, count) = buf.iter().skip(1).step_by(NUM_CHANNELS).fold((0, 0), delta);
         let v_1 = sum / count;
         let r_1 = voltage_divider_resistance_upper(v_1, REFERENCE_RESISTOR_OHM);
@@ -323,13 +331,12 @@ async fn values_from_adc(can: &'static CanBusMutex, adc_ressources: Adcs) {
         let v_2 = sum / count;
         let r_2 = voltage_divider_resistance_upper(v_2, REFERENCE_RESISTOR_OHM);
         let new_backoff_time = linear_correction(5, 30, 100, 10100, r_2);
-        info!(
+        trace!(
             "threshold: {}, {},{},| watering_time: {}, {}, {}| backoff_time: {}, {}, {}",
             new_threshold, v_0, r_0, new_watering_time, v_1, r_1, new_backoff_time, v_2, r_2
         );
         if r_0.abs_diff(old_r0) > ADC_JITTER_ALLOWANCE {
             old_r0 = r_0;
-            threshold = new_threshold;
             info!("have to update threshold");
             let mut can = can.lock().await;
             info!("got can");
@@ -338,7 +345,6 @@ async fn values_from_adc(can: &'static CanBusMutex, adc_ressources: Adcs) {
         }
         if r_1.abs_diff(old_r1) > ADC_JITTER_ALLOWANCE {
             old_r1 = r_1;
-            watering_time = new_watering_time;
             info!("have to update watering time");
             let mut can = can.lock().await;
             set_value(&mut can, Commands::WateringTime, new_watering_time, 1);
@@ -346,7 +352,6 @@ async fn values_from_adc(can: &'static CanBusMutex, adc_ressources: Adcs) {
         }
         if r_2.abs_diff(old_r2) > ADC_JITTER_ALLOWANCE {
             old_r2 = r_2;
-            backoff_time = new_backoff_time;
             info!("have to update backoff_time");
             let mut can = can.lock().await;
             set_value(&mut can, Commands::BackoffTime, new_backoff_time, 1);
