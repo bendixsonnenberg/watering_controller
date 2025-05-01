@@ -18,61 +18,62 @@ pub enum Input {
 /// and some State, Input tupels result in sideeffect, therefore this is not a true finite
 /// deterministic state automata
 #[derive(Clone, Copy)]
-pub enum State<T: Sensor> {
+pub enum State<T> {
     SensorsSelect,
     Errors,
     SensorSettings(T),
     SensorStats(T),
 }
 
-pub trait Sensor {
-    fn first() -> Self;
-    fn next(self) -> Self;
-    fn prev(self) -> Self;
-    fn get_setting(self) -> u16;
-    fn get_id(self) -> u8;
-    fn increase_setting(self) -> Self;
-    fn decrease_setting(self) -> Self;
+pub trait Sensor<B> {
+    fn first(builder: B) -> Self;
+    fn next(self, builder: B) -> Self;
+    fn prev(self, builder: B) -> Self;
+    fn get_setting(&self) -> u16;
+    fn get_id(&self) -> u8;
+    fn increase_setting(self, builder: B) -> Self;
+    fn decrease_setting(self, builder: B) -> Self;
 }
 
-pub struct MenuRunner<T: Sensor + Copy + Clone> {
+pub struct MenuRunner<T: Sensor<B> + Clone, B> {
     state: State<T>,
+    builder: B,
 }
 
-impl<T: Sensor + Copy + Clone> Default for MenuRunner<T> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-impl<T: Sensor + Copy + Clone> MenuRunner<T> {
-    pub fn new() -> Self {
+impl<T: Sensor<B> + Clone, B: Clone> MenuRunner<T, B> {
+    pub fn new(builder: B) -> Self {
         Self {
             state: State::<T>::SensorsSelect,
+            builder,
         }
     }
     pub fn input(&mut self, input: Input) {
         use Input::*;
         use State::*;
-        self.state = match (self.state, input) {
+        self.state = match (self.state.clone(), input) {
             (Errors, Left) => SensorsSelect,
             (Errors, _) => Errors,
             (SensorsSelect, Right) => Errors,
-            (SensorsSelect, Enter) => SensorSettings(Sensor::first()),
+            (SensorsSelect, Enter) => SensorSettings(Sensor::first(self.builder.clone())),
             (SensorsSelect, _) => SensorsSelect,
             (SensorSettings(sensor), Enter) => SensorStats(sensor),
-            (SensorSettings(sensor), Right) => SensorSettings(sensor.next()),
-            (SensorSettings(sensor), Left) => SensorSettings(sensor.prev()),
-            (SensorSettings(sensor), Up) => SensorSettings(sensor.increase_setting()),
-            (SensorSettings(sensor), Down) => SensorSettings(sensor.decrease_setting()),
+            (SensorSettings(sensor), Right) => SensorSettings(sensor.next(self.builder.clone())),
+            (SensorSettings(sensor), Left) => SensorSettings(sensor.prev(self.builder.clone())),
+            (SensorSettings(sensor), Up) => {
+                SensorSettings(sensor.increase_setting(self.builder.clone()))
+            }
+            (SensorSettings(sensor), Down) => {
+                SensorSettings(sensor.decrease_setting(self.builder.clone()))
+            }
             (SensorSettings(_), Back) => SensorsSelect,
             (SensorStats(sensor), Back) => SensorSettings(sensor),
             (SensorStats(sensor), _) => SensorStats(sensor),
         }
     }
 }
-impl<T: Sensor + Copy + Clone> Display for MenuRunner<T> {
+impl<T: Sensor<B> + Clone, B> Display for MenuRunner<T, B> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        match self.state {
+        match self.state.clone() {
             State::SensorsSelect => write!(f, "Sensors"),
             State::Errors => write!(f, "errors"),
             State::SensorSettings(sensor) => write!(
