@@ -50,7 +50,6 @@ type CanBus = MCP2515<
         Output<'static>,
     >,
 >;
-
 enum CanData {
     Remote,
     Data(can_contract::CanData),
@@ -207,6 +206,8 @@ async fn main(spawner: Spawner) {
         Timer::after(delay).await;
     }
 }
+#[embassy_executor::task]
+async fn menu_handle() {}
 
 struct DummyTimesource();
 
@@ -339,7 +340,6 @@ async fn poll_sensors(can_tx: CanSender) {
         can_tx.send((Commands::Announce, i, CanData::Remote)).await;
     }
 }
-
 /// handles all the can related stuff, mainly sending messages and routing incoming messages to the
 /// correct receiver
 #[embassy_executor::task]
@@ -351,10 +351,29 @@ async fn can_task(
     send_channel: CanReceiver,
 ) {
     loop {
-        let receive_future = can_interrupt_pin.wait_for_falling_edge();
+        // the only interrupt configure is if we received a message
+        // try to read, if we read a frame, return ready future
+        // or create function for can bus that check the registers to see if there is a message
+        // ready as async
+        let Ok(status) = can.read_status() else {
+            Timer::after_millis(100).await;
+            continue;
+        };
+
+        // check if we already have something to read, otherwise wait for interrupt
+        let receive_future = async {
+            if status.rx0if() || status.rx1if() {
+            } else {
+                can_interrupt_pin.wait_for_low().await
+            };
+        };
+
         let tranceive_future = send_channel.receive();
         match select::select(receive_future, tranceive_future).await {
             select::Either::First(_) => {
+                // reading from the can object also clears the interrupt bit for tranceive
+                // this leads to the interrupt pin being high again
+                // unless another message is already waiting in another receive buffer
                 let Ok(frame) = can.read_message() else {
                     continue;
                 };
@@ -391,12 +410,20 @@ async fn can_task(
                     }
                 };
                 let Some(frame) = frame else { continue };
+
+                // wait until we have a free transmit buffer
+                loop {
+                    if can.find_free_tx_buf().is_ok() {
+                        break;
+                    }
+                    Timer::after_millis(1).await;
+                }
                 match can.send_message(frame) {
                     Ok(_) => {
-                        info!("sent can message")
+                        info!("sent can message");
                     }
                     Err(e) => {
-                        info!("{:?}", e)
+                        info!("{:?}", e);
                     }
                 }
             }
@@ -605,8 +632,6 @@ async fn init_can(can_resources: SpiCan) -> CanBus {
             panic!("failed")
         }
     };
-    // only enable receiving ints
-    let _ = can.write_register(CanInte::new().with_rx0ie(true).with_rx1ie(true));
 
     info!("successful initilization");
     can
