@@ -6,7 +6,7 @@
 #![no_main]
 
 use core::cell::RefCell;
-use core::panic;
+use core::{panic, result};
 
 use assign_resources::*;
 use can_contract::*;
@@ -200,6 +200,7 @@ async fn sd_card_log(can: &'static CanBusMutex, mut sd_card_resources: SpiSdcard
         Timer::after_millis(500).await;
 
         let sdcard = SdCard::new(spi_dev, embassy_time::Delay);
+        sdcard.mark_card_uninit();
         info!("got sd_card");
         Timer::after_millis(500).await;
 
@@ -273,10 +274,13 @@ async fn sd_card_log(can: &'static CanBusMutex, mut sd_card_resources: SpiSdcard
                 break;
             };
             info!("LOG: {}", buffer.clone());
-            let Ok(_) = log_file.write(buffer.clone().as_bytes()) else {
-                info!("failed writing");
-                break;
-            };
+            let res = log_file.write(buffer.clone().as_bytes());
+            match res {
+                Ok(_) => {}
+                Err(e) => {
+                    info!("{:?}", e);
+                }
+            }
             let Ok(_) = log_file.flush() else {
                 info!("failed flushing");
                 break;
