@@ -42,6 +42,8 @@ const ADC_JITTER_ALLOWANCE: u16 = 100; // the amount the adc reading has to diff
 // considred changed
 const ADC_MAX: u16 = 4096;
 const CONTROLLER_DEV_ID: DevId = 0;
+const TX_BACKOFF_TIME: u64 = 5; // time to wait if no tx buffer is available in ms
+
 type CanBus = MCP2515<
     embassy_embedded_hal::shared_bus::blocking::spi::SpiDevice<
         'static,
@@ -50,26 +52,29 @@ type CanBus = MCP2515<
         Output<'static>,
     >,
 >;
-enum CanData {
+enum CanPayload {
     Remote,
     Data(can_contract::CanData),
 }
-type CanChannel =
-    embassy_sync::channel::Channel<ThreadModeRawMutex, (Commands, can_contract::DevId, CanData), 3>;
+type CanChannel = embassy_sync::channel::Channel<
+    ThreadModeRawMutex,
+    (Commands, can_contract::DevId, CanPayload),
+    3,
+>;
 type CanSender = embassy_sync::channel::Sender<
     'static,
     ThreadModeRawMutex,
-    (Commands, can_contract::DevId, CanData),
+    (Commands, can_contract::DevId, CanPayload),
     3,
 >;
 type CanReceiver = embassy_sync::channel::Receiver<
     'static,
     ThreadModeRawMutex,
-    (Commands, can_contract::DevId, CanData),
+    (Commands, can_contract::DevId, CanPayload),
     3,
 >;
 /// type that contains all information for sending frame;
-type CanChannelData = (Commands, DevId, CanData);
+type CanChannelData = (Commands, DevId, CanPayload);
 type SensorBitmap = embassy_sync::blocking_mutex::Mutex<ThreadModeRawMutex, RefCell<Bitmap<256>>>;
 // Program metadata for `picotool info`.
 // This isn't needed, but it's recommended to have these minimal entries.
@@ -337,7 +342,9 @@ async fn poll_sensors(can_tx: CanSender) {
     for i in 1..DevId::MAX {
         // id 0 is the controller
         // ask every id if it exists
-        can_tx.send((Commands::Announce, i, CanData::Remote)).await;
+        can_tx
+            .send((Commands::Announce, i, CanPayload::Remote))
+            .await;
     }
 }
 /// handles all the can related stuff, mainly sending messages and routing incoming messages to the
@@ -351,8 +358,6 @@ async fn can_task(
     send_channel: CanReceiver,
 ) {
     loop {
-        // the only interrupt configure is if we received a message
-        // try to read, if we read a frame, return ready future
         // or create function for can bus that check the registers to see if there is a message
         // ready as async
         let Ok(status) = can.read_status() else {
@@ -368,7 +373,20 @@ async fn can_task(
             };
         };
 
-        let tranceive_future = send_channel.receive();
+        let tranceive_future = async {
+            let fut = send_channel.receive().await;
+            // after we have something to send, only advandce if we can actually send it
+            // wait until we have a free transmit buffer. That way we do not have the risk of
+            // failing to send a message or having to wait and missing a received future
+            loop {
+                if can.find_free_tx_buf().is_ok() {
+                    break;
+                }
+                Timer::after_millis(TX_BACKOFF_TIME).await;
+            }
+            // tx cant get full again because the only way to fill them is if this future finishes
+            fut
+        };
         match select::select(receive_future, tranceive_future).await {
             select::Either::First(_) => {
                 // reading from the can object also clears the interrupt bit for tranceive
@@ -387,7 +405,9 @@ async fn can_task(
                         s.set(dev_id as usize, true);
                     }),
                     (command, Some(dev_id), Some(data)) => {
-                        receive_channel.try_send((command, dev_id, CanData::Data(data)));
+                        // use try send here to avoid blocking the task from interacting with the
+                        // can
+                        receive_channel.try_send((command, dev_id, CanPayload::Data(data)));
                     }
                     (_command, Some(_dev_id), None) => {
                         info!("received remote frame, need to handle it")
@@ -397,27 +417,22 @@ async fn can_task(
             }
             // transmit this message
             select::Either::Second((command, dev_id, data)) => {
+                // we have a free tx buffer and we have got a message, so we should not encounter
+                // tx busy
                 let Some(id) = can_contract::id_from_command_and_dev_id(command, dev_id) else {
                     continue;
                 };
 
                 let frame = match data {
-                    CanData::Remote => CanFrame::new_remote(id, can_contract::DLC),
+                    CanPayload::Remote => CanFrame::new_remote(id, can_contract::DLC),
 
-                    CanData::Data(data) => {
+                    CanPayload::Data(data) => {
                         let buf = can_contract::create_data_buf(data, CONTROLLER_DEV_ID);
                         CanFrame::new(id, &buf)
                     }
                 };
                 let Some(frame) = frame else { continue };
 
-                // wait until we have a free transmit buffer
-                loop {
-                    if can.find_free_tx_buf().is_ok() {
-                        break;
-                    }
-                    Timer::after_millis(1).await;
-                }
                 match can.send_message(frame) {
                     Ok(_) => {
                         info!("sent can message");
@@ -507,7 +522,7 @@ async fn set_value(
     data: can_contract::CanData,
     dev_id: can_contract::DevId,
 ) {
-    can_tx.send((command, dev_id, CanData::Data(data))).await
+    can_tx.send((command, dev_id, CanPayload::Data(data))).await
 }
 async fn get_value(
     can_tx: &mut CanSender,
@@ -516,9 +531,9 @@ async fn get_value(
     dev_id: u8,
     sensors: &SensorBitmap,
 ) -> Option<can_contract::CanData> {
-    can_tx.send((command, dev_id, CanData::Remote)).await;
+    can_tx.send((command, dev_id, CanPayload::Remote)).await;
 
-    let Ok((r_command, r_source_id, CanData::Data(r_data))) = can_rx
+    let Ok((r_command, r_source_id, CanPayload::Data(r_data))) = can_rx
         .receive()
         .with_timeout(Duration::from_millis(500))
         .await
