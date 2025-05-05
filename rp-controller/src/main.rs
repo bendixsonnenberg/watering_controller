@@ -43,6 +43,7 @@ const ADC_JITTER_ALLOWANCE: u16 = 100; // the amount the adc reading has to diff
 const ADC_MAX: u16 = 4096;
 const CONTROLLER_DEV_ID: DevId = 0;
 const TX_BACKOFF_TIME: u64 = 5; // time to wait if no tx buffer is available in ms
+const CHANNEL_SIZE: usize = 5;
 
 type CanBus = MCP2515<
     embassy_embedded_hal::shared_bus::blocking::spi::SpiDevice<
@@ -52,29 +53,18 @@ type CanBus = MCP2515<
         Output<'static>,
     >,
 >;
+type CanChannelData = (Commands, can_contract::DevId, CanPayload);
+#[derive(Debug)]
 enum CanPayload {
     Remote,
     Data(can_contract::CanData),
 }
-type CanChannel = embassy_sync::channel::Channel<
-    ThreadModeRawMutex,
-    (Commands, can_contract::DevId, CanPayload),
-    3,
->;
-type CanSender = embassy_sync::channel::Sender<
-    'static,
-    ThreadModeRawMutex,
-    (Commands, can_contract::DevId, CanPayload),
-    3,
->;
-type CanReceiver = embassy_sync::channel::Receiver<
-    'static,
-    ThreadModeRawMutex,
-    (Commands, can_contract::DevId, CanPayload),
-    3,
->;
+type CanChannel = embassy_sync::channel::Channel<ThreadModeRawMutex, CanChannelData, CHANNEL_SIZE>;
+type CanSender =
+    embassy_sync::channel::Sender<'static, ThreadModeRawMutex, CanChannelData, CHANNEL_SIZE>;
+type CanReceiver =
+    embassy_sync::channel::Receiver<'static, ThreadModeRawMutex, CanChannelData, CHANNEL_SIZE>;
 /// type that contains all information for sending frame;
-type CanChannelData = (Commands, DevId, CanPayload);
 type SensorBitmap = embassy_sync::blocking_mutex::Mutex<ThreadModeRawMutex, RefCell<Bitmap<256>>>;
 // Program metadata for `picotool info`.
 // This isn't needed, but it's recommended to have these minimal entries.
@@ -364,6 +354,8 @@ async fn can_task(
             Timer::after_millis(100).await;
             continue;
         };
+        // these futures can be blocked, so do not modify the channals in them or do something that
+        // changes a status
 
         // check if we already have something to read, otherwise wait for interrupt
         let receive_future = async {
@@ -374,18 +366,15 @@ async fn can_task(
         };
 
         let tranceive_future = async {
-            let fut = send_channel.receive().await;
-            // after we have something to send, only advandce if we can actually send it
-            // wait until we have a free transmit buffer. That way we do not have the risk of
-            // failing to send a message or having to wait and missing a received future
             loop {
                 if can.find_free_tx_buf().is_ok() {
                     break;
                 }
                 Timer::after_millis(TX_BACKOFF_TIME).await;
             }
+            // after we can send something, wait until we have something to send.
+            send_channel.receive().await
             // tx cant get full again because the only way to fill them is if this future finishes
-            fut
         };
         match select::select(receive_future, tranceive_future).await {
             select::Either::First(_) => {
@@ -407,7 +396,13 @@ async fn can_task(
                     (command, Some(dev_id), Some(data)) => {
                         // use try send here to avoid blocking the task from interacting with the
                         // can
-                        receive_channel.try_send((command, dev_id, CanPayload::Data(data)));
+                        let r = receive_channel.try_send((command, dev_id, CanPayload::Data(data)));
+                        match r {
+                            Ok(_) => {}
+                            Err(e) => {
+                                info!("{:?}", e);
+                            }
+                        }
                     }
                     (_command, Some(_dev_id), None) => {
                         info!("received remote frame, need to handle it")
