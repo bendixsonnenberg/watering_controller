@@ -7,6 +7,7 @@
 
 use core::cell::RefCell;
 use core::panic;
+use core::sync::atomic::AtomicU16;
 
 use assign_resources::*;
 use bitmaps::Bitmap;
@@ -16,16 +17,17 @@ use cyw43_pio::{DEFAULT_CLOCK_DIVIDER, PioSpi};
 use defmt::unwrap;
 use embassy_executor::Spawner;
 use embassy_futures::select;
+use embassy_rp::Peri;
 use embassy_rp::adc::{Adc, Channel, Sample};
-use embassy_rp::gpio::{AnyPin, Input, Level, Output, Pull};
+use embassy_rp::gpio::{Input, Level, Output, Pull};
 use embassy_rp::peripherals::{self, DMA_CH0, PIO0, SPI1, USB};
 use embassy_rp::pio::{InterruptHandler, Pio};
 use embassy_rp::spi::{Blocking, Spi};
 use embassy_rp::usb::Driver;
-use embassy_rp::{Peri, gpio};
 use embassy_rp::{bind_interrupts, spi};
 use embassy_sync::blocking_mutex::NoopMutex;
 use embassy_sync::blocking_mutex::raw::{NoopRawMutex, ThreadModeRawMutex};
+use embassy_sync::channel::TrySendError;
 use embassy_time::{Delay, Duration, Instant, Ticker, Timer, WithTimeout};
 use embedded_can::Frame;
 use embedded_hal_bus::spi::ExclusiveDevice;
@@ -33,9 +35,8 @@ use embedded_sdmmc::{SdCard, VolumeIdx, VolumeManager};
 use heapless::String;
 use log::*;
 use mcp2515::frame::CanFrame;
-use mcp2515::regs::CanInte;
 use mcp2515::*;
-use static_cell::{ConstStaticCell, StaticCell};
+use static_cell::StaticCell;
 use {defmt_rtt as _, panic_probe as _};
 const REFERENCE_RESISTOR_OHM: u16 = 100;
 const ADC_JITTER_ALLOWANCE: u16 = 100; // the amount the adc reading has to differ for it to be
@@ -43,7 +44,7 @@ const ADC_JITTER_ALLOWANCE: u16 = 100; // the amount the adc reading has to diff
 const ADC_MAX: u16 = 4096;
 const CONTROLLER_DEV_ID: DevId = 0;
 const TX_BACKOFF_TIME: u64 = 5; // time to wait if no tx buffer is available in ms
-const CHANNEL_SIZE: usize = 5;
+const CHANNEL_SIZE: usize = 100;
 
 type CanBus = MCP2515<
     embassy_embedded_hal::shared_bus::blocking::spi::SpiDevice<
@@ -66,6 +67,18 @@ type CanReceiver =
     embassy_sync::channel::Receiver<'static, ThreadModeRawMutex, CanChannelData, CHANNEL_SIZE>;
 /// type that contains all information for sending frame;
 type SensorBitmap = embassy_sync::blocking_mutex::Mutex<ThreadModeRawMutex, RefCell<Bitmap<256>>>;
+
+/// struct for shared data
+struct DefaultSettings {
+    threshold: AtomicU16,
+    watering_time: AtomicU16,
+    backoff_time: AtomicU16,
+}
+static SHARED_SETTINGS: DefaultSettings = DefaultSettings {
+    threshold: AtomicU16::new(1800),
+    watering_time: AtomicU16::new(15),
+    backoff_time: AtomicU16::new(5),
+};
 // Program metadata for `picotool info`.
 // This isn't needed, but it's recommended to have these minimal entries.
 #[unsafe(link_section = ".bi_entries")]
@@ -166,10 +179,15 @@ async fn main(spawner: Spawner) {
 
     let can = init_can(r.spi_can).await;
 
-    static CAN_CHANNEL: CanChannel = CanChannel::new();
+    static CAN_SEND_CHANNEL: CanChannel = CanChannel::new();
+    static CAN_RECEIVE_CHANNEL: CanChannel = CanChannel::new();
 
-    let can_rx = CAN_CHANNEL.receiver();
-    let can_tx = CAN_CHANNEL.sender();
+    // this channel are the messages that go from some tasks to the can
+    let can_send_rx = CAN_SEND_CHANNEL.receiver();
+    let can_send_tx = CAN_SEND_CHANNEL.sender();
+    // this channel are the messages that go from the can to the tasks(sd_card_log)
+    let can_receive_rx = CAN_RECEIVE_CHANNEL.receiver();
+    let can_receive_tx = CAN_RECEIVE_CHANNEL.sender();
     // setting up a bitmap of existing sensors
     static SENSORS: StaticCell<SensorBitmap> = StaticCell::new();
     let sensors = SENSORS.init(embassy_sync::blocking_mutex::Mutex::new(RefCell::new(
@@ -180,17 +198,23 @@ async fn main(spawner: Spawner) {
         can,
         Input::new(r.can_int.int, Pull::Up),
         sensors,
-        can_tx,
-        can_rx
+        can_receive_tx,
+        can_send_rx,
+        can_send_tx,
     )));
 
     // populate the bitmap,
     // we want to do this before the other tasks are spawned to reduce the chance of the channels
     // overflowing
-    poll_sensors(can_tx).await;
+    poll_sensors(can_send_tx).await;
 
-    unwrap!(spawner.spawn(values_from_adc(can_tx, r.adcs)));
-    unwrap!(spawner.spawn(sd_card_log(can_tx, can_rx, sensors, r.spi_sdcard)));
+    unwrap!(spawner.spawn(values_from_adc(can_send_tx, r.adcs)));
+    unwrap!(spawner.spawn(sd_card_log(
+        can_send_tx,
+        can_receive_rx,
+        sensors,
+        r.spi_sdcard
+    )));
 
     let delay = Duration::from_millis(250);
     loop {
@@ -337,6 +361,39 @@ async fn poll_sensors(can_tx: CanSender) {
             .await;
     }
 }
+/// sends settings to the given channel. May fail at sending if the channel is full
+fn send_settings_to_sensor(
+    dev_id: can_contract::DevId,
+    channel: CanSender,
+) -> Result<(), TrySendError<(Commands, can_contract::DevId, CanPayload)>> {
+    channel.try_send((
+        Commands::Threshold,
+        dev_id,
+        CanPayload::Data(
+            SHARED_SETTINGS
+                .threshold
+                .load(core::sync::atomic::Ordering::Relaxed),
+        ),
+    ))?;
+    channel.try_send((
+        Commands::WateringTime,
+        dev_id,
+        CanPayload::Data(
+            SHARED_SETTINGS
+                .watering_time
+                .load(core::sync::atomic::Ordering::Relaxed),
+        ),
+    ))?;
+    channel.try_send((
+        Commands::BackoffTime,
+        dev_id,
+        CanPayload::Data(
+            SHARED_SETTINGS
+                .backoff_time
+                .load(core::sync::atomic::Ordering::Relaxed),
+        ),
+    ))
+}
 /// handles all the can related stuff, mainly sending messages and routing incoming messages to the
 /// correct receiver
 #[embassy_executor::task]
@@ -346,6 +403,7 @@ async fn can_task(
     sensors: &'static SensorBitmap,
     receive_channel: CanSender,
     send_channel: CanReceiver,
+    self_send: CanSender,
 ) {
     loop {
         // or create function for can bus that check the registers to see if there is a message
@@ -362,6 +420,12 @@ async fn can_task(
             if status.rx0if() || status.rx1if() {
             } else {
                 can_interrupt_pin.wait_for_low().await
+            };
+            // delay if we wont be able to do anything with the message
+            // only a shot delay, because otherwise we miss messages on the bus
+            if send_channel.is_full() {
+                // this allows other tasks to do something with the message
+                Timer::after_millis(TX_BACKOFF_TIME).await;
             };
         };
 
@@ -392,6 +456,9 @@ async fn can_task(
                         // tell everyone that this sensor is connected
                         let mut s = sensors.borrow_mut();
                         s.set(dev_id as usize, true);
+                        // tell the new sensor what the settings are
+
+                        let _ = send_settings_to_sensor(dev_id, self_send);
                     }),
                     (command, Some(dev_id), Some(data)) => {
                         // use try send here to avoid blocking the task from interacting with the
@@ -493,18 +560,27 @@ async fn values_from_adc(mut can_tx: CanSender, adc_ressources: Adcs) {
             info!("got can");
             set_value(&mut can_tx, Commands::Threshold, new_threshold, 1).await;
             set_value(&mut can_tx, Commands::Threshold, new_threshold, 2).await;
+            SHARED_SETTINGS
+                .threshold
+                .store(new_threshold, core::sync::atomic::Ordering::Relaxed);
         }
         if r_1.abs_diff(old_r1) > ADC_JITTER_ALLOWANCE {
             old_r1 = r_1;
             info!("have to update watering time");
             set_value(&mut can_tx, Commands::WateringTime, new_watering_time, 1).await;
             set_value(&mut can_tx, Commands::WateringTime, new_watering_time, 2).await;
+            SHARED_SETTINGS
+                .watering_time
+                .store(new_watering_time, core::sync::atomic::Ordering::Relaxed);
         }
         if r_2.abs_diff(old_r2) > ADC_JITTER_ALLOWANCE {
             old_r2 = r_2;
             info!("have to update backoff_time");
             set_value(&mut can_tx, Commands::BackoffTime, new_backoff_time, 1).await;
             set_value(&mut can_tx, Commands::BackoffTime, new_backoff_time, 2).await;
+            SHARED_SETTINGS
+                .backoff_time
+                .store(new_backoff_time, core::sync::atomic::Ordering::Relaxed);
         }
         Timer::after_millis(100).await;
     }
