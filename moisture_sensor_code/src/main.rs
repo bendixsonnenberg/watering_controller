@@ -1,7 +1,7 @@
 #![no_std]
 #![no_main]
 
-use core::sync::atomic::{AtomicU16, Ordering, AtomicU8};
+use core::sync::atomic::{AtomicU16, AtomicU8, Ordering};
 
 use assign_resources::assign_resources;
 use can::{
@@ -11,7 +11,11 @@ use can::{
 use can_contract::*;
 use defmt::*;
 use embassy_executor::Spawner;
-use embassy_stm32::{gpio::{AnyPin, Input}, interrupt::InterruptExt};
+
+use embassy_stm32::{
+    gpio::{AnyPin, Input},
+    interrupt::InterruptExt,
+};
 use embassy_stm32::{rcc::Sysclk, time::Hertz, *};
 use embassy_time::Timer;
 use embedded_hal_bus::i2c::AtomicDevice;
@@ -45,7 +49,7 @@ assign_resources! {
         b5: PA6,
         b6: PA5,
         b7: PA4,
-        
+
     }
 }
 #[derive(Default)]
@@ -63,7 +67,7 @@ static SHARED: SharedData = SharedData {
     watering_time: AtomicU16::new(30),
     backoff_time: AtomicU16::new(15),
 };
-static DEV_ID :AtomicU8 = AtomicU8::new(0);
+static DEV_ID: AtomicU8 = AtomicU8::new(0);
 bind_interrupts!(struct Irqs {
     ADC1_2 => adc::InterruptHandler<peripherals::ADC1>;
     USB_LP_CAN1_RX0 => can::Rx0InterruptHandler<peripherals::CAN>;
@@ -86,10 +90,19 @@ async fn main(_spawner: Spawner) {
     // checking id
     {
         let r = r.dev_id;
-        let mut dev_id:u8 = 0;
+        let mut dev_id: u8 = 0;
         let pull = gpio::Pull::Up;
         // this is ugly, should fix later
-        let pins: [AnyPin; 8] = [r.b0.into(), r.b1.into(), r.b2.into(), r.b3.into(), r.b4.into(), r.b5.into(), r.b6.into(), r.b7.into()];
+        let pins: [AnyPin; 8] = [
+            r.b0.into(),
+            r.b1.into(),
+            r.b2.into(),
+            r.b3.into(),
+            r.b4.into(),
+            r.b5.into(),
+            r.b6.into(),
+            r.b7.into(),
+        ];
         for pin in pins {
             let input = Input::new(pin, pull);
             if input.is_high() {
@@ -98,6 +111,7 @@ async fn main(_spawner: Spawner) {
             dev_id *= 2;
         }
         DEV_ID.store(dev_id, Ordering::Relaxed);
+        info!("got device id: {}", dev_id);
     }
 
     // setup relay

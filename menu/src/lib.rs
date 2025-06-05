@@ -9,9 +9,7 @@ use core::fmt::Display;
 pub enum Input {
     Enter,
     Back,
-    Up,
     Right,
-    Down,
     Left,
 }
 /// this enum contains the possible states that the menu can be in. Some states can have values,
@@ -21,8 +19,8 @@ pub enum Input {
 pub enum State<T> {
     SensorsSelect,
     Errors,
+    SensorSelection(T),
     SensorSettings(T),
-    SensorStats(T),
 }
 
 pub trait Sensor<B> {
@@ -54,20 +52,20 @@ impl<T: Sensor<B> + Clone, B: Clone> MenuRunner<T, B> {
             (Errors, Left) => SensorsSelect,
             (Errors, _) => Errors,
             (SensorsSelect, Right) => Errors,
-            (SensorsSelect, Enter) => SensorSettings(Sensor::first(self.builder.clone())),
+            (SensorsSelect, Enter) => SensorSelection(Sensor::first(self.builder.clone())),
             (SensorsSelect, _) => SensorsSelect,
-            (SensorSettings(sensor), Enter) => SensorStats(sensor),
-            (SensorSettings(sensor), Right) => SensorSettings(sensor.next(self.builder.clone())),
-            (SensorSettings(sensor), Left) => SensorSettings(sensor.prev(self.builder.clone())),
-            (SensorSettings(sensor), Up) => {
+            (SensorSelection(sensor), Enter) => SensorSettings(sensor),
+            (SensorSelection(sensor), Right) => SensorSelection(sensor.next(self.builder.clone())),
+            (SensorSelection(sensor), Left) => SensorSelection(sensor.prev(self.builder.clone())),
+            (SensorSettings(sensor), Left) => {
                 SensorSettings(sensor.increase_setting(self.builder.clone()))
             }
-            (SensorSettings(sensor), Down) => {
+            (SensorSettings(sensor), Right) => {
                 SensorSettings(sensor.decrease_setting(self.builder.clone()))
             }
-            (SensorSettings(_), Back) => SensorsSelect,
-            (SensorStats(sensor), Back) => SensorSettings(sensor),
-            (SensorStats(sensor), _) => SensorStats(sensor),
+            (SensorSelection(_), Back) => SensorsSelect,
+            (SensorSettings(sensor), Back) => SensorSelection(sensor),
+            (SensorSettings(sensor), Enter) => SensorSettings(sensor),
         }
     }
 }
@@ -76,13 +74,13 @@ impl<T: Sensor<B> + Clone, B> Display for MenuRunner<T, B> {
         match self.state.clone() {
             State::SensorsSelect => write!(f, "Sensors"),
             State::Errors => write!(f, "errors"),
-            State::SensorSettings(sensor) => write!(
+            State::SensorSelection(sensor) => write!(
                 f,
                 "Sensor {}, Threshold: {}",
                 sensor.get_id(),
                 sensor.get_setting()
             ),
-            State::SensorStats(sensor) => write!(f, "Stats for sensor: {}", sensor.get_id()),
+            State::SensorSettings(sensor) => write!(f, "Setpoint: {}", sensor.get_setting()),
         }
     }
 }
