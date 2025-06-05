@@ -4,6 +4,7 @@
 
 #![no_std]
 #![no_main]
+mod debounce;
 
 use core::cell::RefCell;
 use core::panic;
@@ -17,13 +18,14 @@ use cyw43_pio::{DEFAULT_CLOCK_DIVIDER, PioSpi};
 use defmt::unwrap;
 use embassy_executor::Spawner;
 use embassy_futures::select;
-use embassy_rp::Peri;
-use embassy_rp::adc::{Adc, Channel, Sample};
 use embassy_rp::gpio::{Input, Level, Output, Pull};
-use embassy_rp::peripherals::{self, DMA_CH0, PIO0, SPI1, USB};
+use embassy_rp::pac::common;
+use embassy_rp::peripherals::{self, DMA_CH0, PIO0, PIO1, SPI0, USB};
 use embassy_rp::pio::{InterruptHandler, Pio};
+use embassy_rp::pio_programs::rotary_encoder::{Direction, PioEncoder, PioEncoderProgram};
 use embassy_rp::spi::{Blocking, Spi};
 use embassy_rp::usb::Driver;
+use embassy_rp::{Peri, i2c};
 use embassy_rp::{bind_interrupts, spi};
 use embassy_sync::blocking_mutex::NoopMutex;
 use embassy_sync::blocking_mutex::raw::{NoopRawMutex, ThreadModeRawMutex};
@@ -36,12 +38,10 @@ use heapless::String;
 use log::*;
 use mcp2515::frame::CanFrame;
 use mcp2515::*;
+use menu::{MenuRunner, Sensor};
 use static_cell::StaticCell;
 use {defmt_rtt as _, panic_probe as _};
-const REFERENCE_RESISTOR_OHM: u16 = 100;
-const ADC_JITTER_ALLOWANCE: u16 = 100; // the amount the adc reading has to differ for it to be
 // considred changed
-const ADC_MAX: u16 = 4096;
 const CONTROLLER_DEV_ID: DevId = 0;
 const TX_BACKOFF_TIME: u64 = 5; // time to wait if no tx buffer is available in ms
 const CHANNEL_SIZE: usize = 100;
@@ -50,7 +50,7 @@ type CanBus = MCP2515<
     embassy_embedded_hal::shared_bus::blocking::spi::SpiDevice<
         'static,
         NoopRawMutex,
-        Spi<'static, SPI1, Blocking>,
+        Spi<'static, SPI0, Blocking>,
         Output<'static>,
     >,
 >;
@@ -94,28 +94,42 @@ pub static PICOTOOL_ENTRIES: [embassy_rp::binary_info::EntryAddr; 4] = [
 ];
 assign_resources! {
     spi_can: SpiCan {
+        spi: SPI0,
+        miso: PIN_4,
+        mosi: PIN_3,
+        clk: PIN_2,
+        cs: PIN_5,
+    },
+    can_int: CanInt {
+        int: PIN_14,
+    },
+    spi_sdcard: SpiSdcard {
         spi: SPI1,
         miso: PIN_8,
         mosi: PIN_11,
         clk: PIN_10,
         cs: PIN_13,
     },
-    can_int: CanInt {
-        int: PIN_14,
+    display_i2c: DisplayI2C {
+        sda: PIN_18,
+        sdc: PIN_19,
+        i2c: I2C1,
     },
-    spi_sdcard: SpiSdcard {
-        spi: SPI0,
-        miso: PIN_4,
-        mosi: PIN_3,
-        clk: PIN_2,
-        cs: PIN_5,
-    }
+    menu_input: MenuInput {
+        back: PIN_17,
+        enter: PIN_22,
+        pio: PIO1,
+        encoder_clock: PIN_20,
+        encoder_dt: PIN_21,
+    },
 }
 
 bind_interrupts!(struct Irqs {
     PIO0_IRQ_0 => InterruptHandler<PIO0>;
+    PIO1_IRQ_0 => InterruptHandler<PIO1>;
     USBCTRL_IRQ => embassy_rp::usb::InterruptHandler<USB>;
     ADC_IRQ_FIFO => embassy_rp::adc::InterruptHandler;
+
 });
 
 #[embassy_executor::task]
@@ -164,6 +178,7 @@ async fn main(spawner: Spawner) {
     let driver = Driver::new(p.USB, Irqs);
     unwrap!(spawner.spawn(cyw43_task(runner)));
     unwrap!(spawner.spawn(logger(driver)));
+    error!("got here");
     info!("hello");
     control.init(clm).await;
     control
@@ -195,18 +210,28 @@ async fn main(spawner: Spawner) {
         can_send_rx,
         can_send_tx,
     )));
+    info!("after can task");
 
-    // populate the bitmap,
-    // we want to do this before the other tasks are spawned to reduce the chance of the channels
-    // overflowing
-    poll_sensors(can_send_tx).await;
-
-    unwrap!(spawner.spawn(sd_card_log(
+    unwrap!(spawner.spawn(menu_handle(
         can_send_tx,
         can_receive_rx,
         sensors,
-        r.spi_sdcard
+        r.display_i2c,
+        r.menu_input
     )));
+    // populate the bitmap,
+    // we want to do this before the other tasks are spawned to reduce the chance of the channels
+    // overflowing
+    //poll_sensors(can_send_tx).await;
+
+    info!("after menu task");
+    Timer::after_millis(50).await;
+    // unwrap!(spawner.spawn(sd_card_log(
+    //     can_send_tx,
+    //     can_receive_rx,
+    //     sensors,
+    //     r.spi_sdcard
+    // )));
 
     let delay = Duration::from_millis(250);
     loop {
@@ -217,8 +242,184 @@ async fn main(spawner: Spawner) {
         Timer::after(delay).await;
     }
 }
+#[derive(Clone, Copy)]
+struct SensorBuilder {
+    sensors: &'static SensorBitmap,
+    can_tx: CanSender,
+    can_rx: CanReceiver,
+}
+#[derive(Clone, Copy)]
+struct MenuSensor {
+    builder: SensorBuilder,
+    id: u8,
+}
+impl Sensor<SensorBuilder> for MenuSensor {
+    fn first(builder: SensorBuilder) -> Self {
+        let id = builder.sensors.lock(|cell| cell.borrow().first_index());
+        match id {
+            Some(id) => Self {
+                builder: builder,
+                id: id as u8,
+            },
+            None => Self {
+                id: 0,
+                builder: builder,
+            },
+        }
+    }
+    fn next(self, builder: SensorBuilder) -> Self {
+        let id = builder
+            .sensors
+            .lock(|cell| cell.borrow().next_index(self.id as usize));
+        match id {
+            Some(id) => Self {
+                id: id as u8,
+                builder: builder,
+            },
+            None => Sensor::first(builder),
+        }
+    }
+    fn prev(self, builder: SensorBuilder) -> Self {
+        let id = builder.sensors.lock(|cell| {
+            let mut id = cell.borrow().prev_index(self.id as usize);
+            if id.is_none() {
+                id = cell.borrow().last_index();
+            }
+            id
+        });
+        match id {
+            Some(id) => Self {
+                id: id as u8,
+                builder: builder,
+            },
+            None => Self {
+                id: 0,
+                builder: builder,
+            },
+        }
+    }
+    async fn get_setting(&self) -> u16 {
+        get_value(
+            &mut self.builder.can_tx,
+            &mut self.builder.can_rx,
+            Commands::Threshold,
+            self.id,
+            builder.sensors,
+        )
+        .await
+    }
+    fn get_id(&self) -> u8 {
+        19
+    }
+    fn increase_setting(self, builder: SensorBuilder) -> Self {
+        Self {}
+    }
+    fn decrease_setting(self, builder: SensorBuilder) -> Self {
+        Self {}
+    }
+}
 #[embassy_executor::task]
-async fn menu_handle() {}
+async fn menu_handle(
+    mut can_tx: CanSender,
+    mut can_rx: CanReceiver,
+    sensors: &'static SensorBitmap,
+    mut display_resources: DisplayI2C,
+    mut menu_resources: MenuInput,
+) {
+    const ADDR: u8 = 0x27;
+    let mut runner: MenuRunner<_, SensorBuilder> =
+        MenuRunner::<MenuSensor, SensorBuilder>::new(SensorBuilder {
+            sensors,
+            can_tx,
+            can_rx,
+        });
+    let mut i2c = i2c::I2c::new_blocking(
+        display_resources.i2c,
+        display_resources.sdc,
+        display_resources.sda,
+        i2c::Config::default(),
+    );
+    info!("created i2c");
+    let mut delay = embassy_time::Delay;
+    let mut lcd = match lcd_lcm1602_i2c::sync_lcd::Lcd::new(&mut i2c, &mut delay)
+        .with_address(ADDR)
+        .with_rows(2)
+        .with_cursor_on(false)
+        .init()
+    {
+        Ok(lcd) => lcd,
+        Err(e) => {
+            error!("failed at init of i2c: {:?}", e);
+            Timer::after_millis(50).await;
+            panic!();
+        }
+    };
+    let mut back_button = Input::new(menu_resources.back, Pull::Down);
+    let mut enter_button = Input::new(menu_resources.enter, Pull::Down);
+
+    let Pio {
+        mut common, sm0, ..
+    } = Pio::new(menu_resources.pio, Irqs);
+    let prg = PioEncoderProgram::new(&mut common);
+    let mut encoder = PioEncoder::new(
+        &mut common,
+        sm0,
+        menu_resources.encoder_clock,
+        menu_resources.encoder_dt,
+        &prg,
+    );
+
+    loop {
+        let mut buffer: String<33> = String::new();
+        let Ok(_) = core::writeln!(&mut buffer, "{}\nnewline", runner) else {
+            break;
+        };
+        let _ = lcd.clear();
+        lcd.set_cursor(0, 0);
+        let (first, second) = match buffer.split_once(|c| c == '\n') {
+            Some((first, second)) => (first, second),
+            None => (buffer.as_str(), ""),
+        };
+        match lcd.write_str(first) {
+            Ok(_) => {}
+            Err(e) => {
+                info!("{:?}", e);
+            }
+        }
+        lcd.set_cursor(1, 0);
+        match lcd.write_str(second) {
+            Ok(_) => {}
+            Err(e) => {
+                info!("{:?}", e);
+            }
+        }
+        info!("waiting");
+        match embassy_futures::select::select3(
+            back_button.wait_for_rising_edge(),
+            enter_button.wait_for_rising_edge(),
+            encoder.read(),
+        )
+        .await
+        {
+            select::Either3::First(_) => {
+                info!("back");
+                runner.input(menu::Input::Back);
+            }
+            select::Either3::Second(_) => {
+                info!("enter");
+                runner.input(menu::Input::Enter);
+            }
+            select::Either3::Third(Direction::Clockwise) => {
+                info!("right");
+                runner.input(menu::Input::Right);
+            }
+            select::Either3::Third(Direction::CounterClockwise) => {
+                info!("left");
+                runner.input(menu::Input::Left);
+            }
+        }
+    }
+}
 
 struct DummyTimesource();
 
@@ -534,58 +735,9 @@ async fn get_value(
     }
     None
 }
-// calculate the resistance of a unknown resistor, by using a known reference resistor. The
-// measured resistance is the resistor to voltage
-fn voltage_divider_resistance_upper(mesurement: u32, known: u16) -> u16 {
-    let alpha = known as u32 * ADC_MAX as u32;
-    // prevent division by 0
-    let mesurement = mesurement.max(1);
-    let division = (alpha) / mesurement;
-    (division as u16) - known
-}
-fn linear_correction(
-    corrected_min: u16,
-    corrected_max: u16,
-    in_min: u16,
-    in_max: u16,
-    input: u16,
-) -> u16 {
-    // Ensure the input is within the specified range
-    if input < in_min {
-        return corrected_min;
-    } else if input > in_max {
-        return corrected_max;
-    }
-
-    // Calculate the corrected value using linear interpolation
-    let slope = (corrected_max as f32 - corrected_min as f32) / (in_max as f32 - in_min as f32);
-    let corrected_value = slope * (input as f32 - in_min as f32) + corrected_min as f32;
-
-    // Convert the result back to u16 and return
-    corrected_value as u16
-}
-/*
-fn linear_correction(
-    corrected_min: u16,
-    corrected_max: u16,
-    in_min: u16,
-    in_max: u16,
-    input: u16,
-) -> u16 {
-    let m_upper = corrected_max.saturating_sub(corrected_min);
-    let m_lower = in_max.saturating_sub(in_min).max(1);
-    let b = m_upper.saturating_mul(in_min).saturating_div(corrected_min);
-    info!("m_0: {}, m_1: {}, b: {}", m_upper, m_lower, b);
-    let upper: u32 = (input as u32).saturating_mul(m_upper as u32);
-    let lower = upper.saturating_div(m_lower as u32);
-    let res = lower.saturating_sub(b as u32);
-    info!("upper: {}, lower: {}, res: {}", upper, lower, res);
-    res as u16
-}
-*/
 async fn init_can(can_resources: SpiCan) -> CanBus {
     info!("initiating can");
-    static SPI_CAN_BUS: StaticCell<NoopMutex<RefCell<Spi<SPI1, Blocking>>>> = StaticCell::new();
+    static SPI_CAN_BUS: StaticCell<NoopMutex<RefCell<Spi<SPI0, Blocking>>>> = StaticCell::new();
     let config = spi::Config::default();
     info!("creating spi device");
     let spi = Spi::new_blocking(
@@ -618,10 +770,14 @@ async fn init_can(can_resources: SpiCan) -> CanBus {
         info!("Failed to set filter ");
         return can;
     }; // controller
+    info!("set filter");
+    Timer::after_millis(50).await;
     // gets t have id 0
     let Ok(_) = can.set_mask(filter::RxMask::Mask0, embedded_can::Id::Standard(MASK)) else {
         return can;
     };
+    info!("set mask");
+    Timer::after_millis(50).await;
     // this enables the interrupt for RX0IE, RX1IE, MERRE, ERRE
     // we only want intterupts for receiving
     match can.init(&mut Delay, settings) {
@@ -632,7 +788,10 @@ async fn init_can(can_resources: SpiCan) -> CanBus {
             panic!("failed")
         }
     };
+    info!("initilized can");
+    Timer::after_millis(50).await;
 
     info!("successful initilization");
+    Timer::after_millis(50).await;
     can
 }

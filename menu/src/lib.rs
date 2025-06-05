@@ -27,10 +27,10 @@ pub trait Sensor<B> {
     fn first(builder: B) -> Self;
     fn next(self, builder: B) -> Self;
     fn prev(self, builder: B) -> Self;
-    fn get_setting(&self) -> u16;
+    async fn get_setting(&self) -> u16;
     fn get_id(&self) -> u8;
-    fn increase_setting(self, builder: B) -> Self;
-    fn decrease_setting(self, builder: B) -> Self;
+    async fn increase_setting(self, builder: B) -> Self;
+    async fn decrease_setting(self, builder: B) -> Self;
 }
 
 pub struct MenuRunner<T: Sensor<B> + Clone, B> {
@@ -45,7 +45,7 @@ impl<T: Sensor<B> + Clone, B: Clone> MenuRunner<T, B> {
             builder,
         }
     }
-    pub fn input(&mut self, input: Input) {
+    pub async fn input(&mut self, input: Input) {
         use Input::*;
         use State::*;
         self.state = match (self.state.clone(), input) {
@@ -58,10 +58,10 @@ impl<T: Sensor<B> + Clone, B: Clone> MenuRunner<T, B> {
             (SensorSelection(sensor), Right) => SensorSelection(sensor.next(self.builder.clone())),
             (SensorSelection(sensor), Left) => SensorSelection(sensor.prev(self.builder.clone())),
             (SensorSettings(sensor), Left) => {
-                SensorSettings(sensor.increase_setting(self.builder.clone()))
+                SensorSettings(sensor.increase_setting(self.builder.clone()).await)
             }
             (SensorSettings(sensor), Right) => {
-                SensorSettings(sensor.decrease_setting(self.builder.clone()))
+                SensorSettings(sensor.decrease_setting(self.builder.clone()).await)
             }
             (SensorSelection(_), Back) => SensorsSelect,
             (SensorSettings(sensor), Back) => SensorSelection(sensor),
@@ -74,13 +74,10 @@ impl<T: Sensor<B> + Clone, B> Display for MenuRunner<T, B> {
         match self.state.clone() {
             State::SensorsSelect => write!(f, "Sensors"),
             State::Errors => write!(f, "errors"),
-            State::SensorSelection(sensor) => write!(
-                f,
-                "Sensor {}, Threshold: {}",
-                sensor.get_id(),
-                sensor.get_setting()
-            ),
-            State::SensorSettings(sensor) => write!(f, "Setpoint: {}", sensor.get_setting()),
+            State::SensorSelection(sensor) => {
+                write!(f, "Sen:{}Thr:{}", sensor.get_id(), sensor.get_setting())
+            }
+            State::SensorSettings(sensor) => write!(f, "Spt:{}", sensor.get_setting()),
         }
     }
 }
