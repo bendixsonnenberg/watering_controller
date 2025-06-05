@@ -102,13 +102,6 @@ assign_resources! {
     },
     can_int: CanInt {
         int: PIN_14,
-    }
-    adcs: Adcs{
-        adc: ADC,
-        dma: DMA_CH1,
-        pin0: PIN_26,
-        pin1: PIN_27,
-        pin2: PIN_28,
     },
     spi_sdcard: SpiSdcard {
         spi: SPI0,
@@ -208,7 +201,6 @@ async fn main(spawner: Spawner) {
     // overflowing
     poll_sensors(can_send_tx).await;
 
-    unwrap!(spawner.spawn(values_from_adc(can_send_tx, r.adcs)));
     unwrap!(spawner.spawn(sd_card_log(
         can_send_tx,
         can_receive_rx,
@@ -505,84 +497,6 @@ async fn can_task(
                 }
             }
         }
-    }
-}
-#[embassy_executor::task]
-async fn values_from_adc(mut can_tx: CanSender, adc_ressources: Adcs) {
-    info!("starting adcs");
-    let mut adc = Adc::new(adc_ressources.adc, Irqs, embassy_rp::adc::Config::default());
-    let mut dma = adc_ressources.dma;
-
-    let channel0 = Channel::new_pin(adc_ressources.pin0, embassy_rp::gpio::Pull::None);
-    let channel1 = Channel::new_pin(adc_ressources.pin1, embassy_rp::gpio::Pull::None);
-    let channel2 = Channel::new_pin(adc_ressources.pin2, embassy_rp::gpio::Pull::None);
-
-    let mut channels = [channel1, channel2, channel0];
-    const SAMPLES: usize = 100;
-    const NUM_CHANNELS: usize = 3;
-    let mut old_r0 = 5000;
-    let mut old_r1 = 5000;
-    let mut old_r2 = 5000;
-    loop {
-        let mut buf = [Sample::default(); { SAMPLES * NUM_CHANNELS }];
-        let div = 48_000_000 / (100_000 * NUM_CHANNELS) - 1;
-
-        adc.read_many_multichannel_raw(&mut channels, &mut buf, div as u16, dma.reborrow())
-            .await;
-        info!("read adc");
-        let delta = |(sum, count): (u32, u32), value: &Sample| {
-            if value.good() {
-                (sum + value.value() as u32, count + 1)
-            } else {
-                (sum, count)
-            }
-        };
-        // deinterlacing buf so that only the results for a single pin are considered
-        let (sum, count) = buf.iter().step_by(NUM_CHANNELS).fold((0, 0), delta);
-        let v_0 = sum / count;
-        let r_0 = voltage_divider_resistance_upper(v_0, REFERENCE_RESISTOR_OHM);
-        let new_threshold = linear_correction(2500, 1500, 100, 10100, r_0);
-        let (sum, count) = buf.iter().skip(1).step_by(NUM_CHANNELS).fold((0, 0), delta);
-        let v_1 = sum / count;
-        let r_1 = voltage_divider_resistance_upper(v_1, REFERENCE_RESISTOR_OHM);
-        let new_watering_time = linear_correction(15, 90, 100, 10100, r_1);
-        let (sum, count) = buf.iter().skip(2).step_by(NUM_CHANNELS).fold((0, 0), delta);
-        let v_2 = sum / count;
-        let r_2 = voltage_divider_resistance_upper(v_2, REFERENCE_RESISTOR_OHM);
-        let new_backoff_time = linear_correction(5, 30, 100, 10100, r_2);
-        info!(
-            "threshold: {}, {},{},| watering_time: {}, {}, {}| backoff_time: {}, {}, {}",
-            new_threshold, v_0, r_0, new_watering_time, v_1, r_1, new_backoff_time, v_2, r_2
-        );
-        if r_0.abs_diff(old_r0) > ADC_JITTER_ALLOWANCE {
-            old_r0 = r_0;
-            info!("have to update threshold");
-            info!("got can");
-            set_value(&mut can_tx, Commands::Threshold, new_threshold, 1).await;
-            set_value(&mut can_tx, Commands::Threshold, new_threshold, 2).await;
-            SHARED_SETTINGS
-                .threshold
-                .store(new_threshold, core::sync::atomic::Ordering::Relaxed);
-        }
-        if r_1.abs_diff(old_r1) > ADC_JITTER_ALLOWANCE {
-            old_r1 = r_1;
-            info!("have to update watering time");
-            set_value(&mut can_tx, Commands::WateringTime, new_watering_time, 1).await;
-            set_value(&mut can_tx, Commands::WateringTime, new_watering_time, 2).await;
-            SHARED_SETTINGS
-                .watering_time
-                .store(new_watering_time, core::sync::atomic::Ordering::Relaxed);
-        }
-        if r_2.abs_diff(old_r2) > ADC_JITTER_ALLOWANCE {
-            old_r2 = r_2;
-            info!("have to update backoff_time");
-            set_value(&mut can_tx, Commands::BackoffTime, new_backoff_time, 1).await;
-            set_value(&mut can_tx, Commands::BackoffTime, new_backoff_time, 2).await;
-            SHARED_SETTINGS
-                .backoff_time
-                .store(new_backoff_time, core::sync::atomic::Ordering::Relaxed);
-        }
-        Timer::after_millis(100).await;
     }
 }
 
