@@ -76,7 +76,7 @@ struct DefaultSettings {
 static SHARED_SETTINGS: DefaultSettings = DefaultSettings {
     threshold: AtomicU16::new(1800),
     watering_time: AtomicU16::new(15),
-    backoff_time: AtomicU16::new(5),
+    backoff_time: AtomicU16::new(20),
 };
 // Program metadata for `picotool info`.
 // This isn't needed, but it's recommended to have these minimal entries.
@@ -445,12 +445,12 @@ async fn menu_handle(
                 runner.input(menu::Input::Enter).await;
             }
             select::Either3::Third(Direction::Clockwise) => {
-                info!("right");
-                runner.input(menu::Input::Right).await;
-            }
-            select::Either3::Third(Direction::CounterClockwise) => {
                 info!("left");
                 runner.input(menu::Input::Left).await;
+            }
+            select::Either3::Third(Direction::CounterClockwise) => {
+                info!("right");
+                runner.input(menu::Input::Right).await;
             }
         }
     }
