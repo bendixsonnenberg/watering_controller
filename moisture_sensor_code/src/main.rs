@@ -93,7 +93,7 @@ async fn main(_spawner: Spawner) {
         let mut dev_id: u8 = 0;
         let pull = gpio::Pull::Up;
         // this is ugly, should fix later
-        let pins: [AnyPin; 8] = [
+        let pins: [AnyPin; 7] = [
             r.b0.into(),
             r.b1.into(),
             r.b2.into(),
@@ -101,14 +101,20 @@ async fn main(_spawner: Spawner) {
             r.b4.into(),
             r.b5.into(),
             r.b6.into(),
-            r.b7.into(),
+            // r.b7.into(),
         ];
         for pin in pins {
             let input = Input::new(pin, pull);
-            if input.is_high() {
+            if input.is_low() {
+                info!("is high");
                 dev_id += 1;
             }
+            info!("dev_id:{}", dev_id);
             dev_id *= 2;
+        }
+        if dev_id == 0 {
+            error!("dev_id is incorrect");
+            return;
         }
         DEV_ID.store(dev_id, Ordering::Relaxed);
         info!("got device id: {}", dev_id);
@@ -285,8 +291,6 @@ async fn handle_modify_threshold(can_resources: CanResources) {
                         // just
                     } else {
                         send_data_over_can(&mut can, 0, command, CONTROLLER_ID, dev_id).await;
-                        // help with potential conflicts
-                        send_data_over_can(&mut can, 0, command, dev_id, dev_id).await;
                     }
                 }
             }
@@ -331,7 +335,7 @@ async fn init_can(resourses: CanResources) -> Can<'static> {
         .set_loopback(false)
         .set_silent(false);
     can.enable().await;
+    info!("sending announcement");
     send_data_over_can(&mut can, 0, Commands::Announce, CONTROLLER_ID, dev_id).await;
-    send_data_over_can(&mut can, 0, Commands::Announce, dev_id, dev_id).await;
     can
 }

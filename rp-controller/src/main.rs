@@ -100,7 +100,7 @@ assign_resources! {
         cs: PIN_5,
     },
     can_int: CanInt {
-        int: PIN_14,
+        int: PIN_6,
     },
     spi_sdcard: SpiSdcard {
         spi: SPI1,
@@ -115,7 +115,7 @@ assign_resources! {
         i2c: I2C1,
     },
     menu_input: MenuInput {
-        back: PIN_17,
+        back: PIN_16,
         enter: PIN_22,
         pio: PIO1,
         encoder_clock: PIN_20,
@@ -220,7 +220,7 @@ async fn main(spawner: Spawner) {
     // populate the bitmap,
     // we want to do this before the other tasks are spawned to reduce the chance of the channels
     // overflowing
-    //poll_sensors(can_send_tx).await;
+    // poll_sensors(can_send_tx).await;
 
     info!("after menu task");
     Timer::after_millis(50).await;
@@ -262,6 +262,10 @@ impl SensorBuilder {
     }
     // try to get the threshold for this sensor, if it failes return none
     async fn populate(mut self, mut sensor: MenuSensor) -> Option<MenuSensor> {
+        info!(
+            "populating with: id: {}, threshold: {:?}",
+            sensor.id, sensor.threshold
+        );
         if let Some(threshold) = get_value(
             &mut self.can_tx,
             &mut self.can_rx,
@@ -274,6 +278,7 @@ impl SensorBuilder {
             sensor.threshold = Some(threshold);
             Some(sensor)
         } else {
+            error!("failed at getting threshold value");
             None
         }
     }
@@ -319,24 +324,29 @@ impl Sensor<SensorBuilder> for MenuSensor {
         self.id
     }
     fn increase_setting(mut self, mut _builder: SensorBuilder) -> Option<Self> {
+        info!("increase");
         if let Some(threshold) = self.threshold {
             self.threshold = Some(threshold.saturating_add(1));
         } else {
             self.threshold = None
         }
+        self.send_over_can();
         Some(self)
     }
     fn decrease_setting(mut self, mut _builder: SensorBuilder) -> Option<Self> {
+        info!("decrease");
         if let Some(threshold) = self.threshold {
             self.threshold = Some(threshold.saturating_sub(1));
         } else {
             self.threshold = None
         }
+        self.send_over_can();
         Some(self)
     }
 }
-impl Drop for MenuSensor {
-    fn drop(&mut self) {
+
+impl MenuSensor {
+    fn send_over_can(&mut self) {
         if let Some(threshold) = self.threshold {
             let mut tx = self.builder.can_tx;
             set_value(&mut tx, Commands::Threshold, threshold, self.id)
@@ -403,7 +413,7 @@ async fn menu_handle(
             panic!();
         }
     };
-    let mut back_button = Input::new(menu_resources.back, Pull::Down);
+    let mut back_button = Input::new(menu_resources.back, Pull::Up);
     let mut enter_button = Input::new(menu_resources.enter, Pull::Down);
 
     let Pio {
@@ -421,14 +431,13 @@ async fn menu_handle(
     loop {
         runner.update().await;
         let mut buffer: String<33> = String::new();
-        let Ok(_) = core::writeln!(&mut buffer, "{}\nnewline", runner) else {
+        let Ok(_) = core::writeln!(&mut buffer, "{}", runner) else {
             break;
         };
         write_two_lines(&mut lcd, buffer.as_str());
-        info!("waiting");
         match embassy_futures::select::select3(
-            back_button.wait_for_rising_edge(),
-            enter_button.wait_for_rising_edge(),
+            back_button.wait_for_falling_edge(),
+            enter_button.wait_for_falling_edge(),
             encoder.read(),
         )
         .await
@@ -642,6 +651,8 @@ async fn can_task(
         // changes a status
 
         // check if we already have something to read, otherwise wait for interrupt
+        // info!("send channel full: {:?}", send_channel.is_full());
+        // info!("rx0if: {:?}, rx1if: {:?}", status.rx0if(), status.rx1if());
         let receive_future = async {
             if status.rx0if() || status.rx1if() {
             } else {
@@ -668,6 +679,7 @@ async fn can_task(
         };
         match select::select(receive_future, tranceive_future).await {
             select::Either::First(_) => {
+                // info!("got frame");
                 // reading from the can object also clears the interrupt bit for tranceive
                 // this leads to the interrupt pin being high again
                 // unless another message is already waiting in another receive buffer
@@ -679,9 +691,11 @@ async fn can_task(
                 };
                 match frame {
                     (Commands::Announce, Some(dev_id), _) => sensors.lock(|sensors| {
+                        // info!("got announcment fomr {}", dev_id);
                         // tell everyone that this sensor is connected
                         let mut s = sensors.borrow_mut();
                         s.set(dev_id as usize, true);
+                        // info!("{:?}", s.first_index());
                         // tell the new sensor what the settings are
 
                         let _ = send_settings_to_sensor(dev_id, self_send);
@@ -707,6 +721,10 @@ async fn can_task(
             select::Either::Second((command, dev_id, data)) => {
                 // we have a free tx buffer and we have got a message, so we should not encounter
                 // tx busy
+                info!(
+                    "sending can frame with: {:?}, id: {} data: {:?}",
+                    command, dev_id, data
+                );
                 let Some(id) = can_contract::id_from_command_and_dev_id(command, dev_id) else {
                     continue;
                 };
