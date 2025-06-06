@@ -18,13 +18,10 @@ use embassy_stm32::{
 };
 use embassy_stm32::{rcc::Sysclk, time::Hertz, *};
 use embassy_time::Timer;
-use embedded_hal_bus::i2c::AtomicDevice;
 use gpio::{Level, Output, Speed};
 
 use {defmt_rtt as _, panic_probe as _};
-mod time_source;
 // define constants
-const LOG_INTERVAL: u64 = 5; // at n*LOG_INTERVAL seconds a log entry is written
 const CAN_BITRATE: u32 = 125_000; // bitrate for can bus. We are not transfering large amounts of
                                   // data ,so lets keep this low
 const CONTROLLER_ID: u8 = 0;
@@ -313,7 +310,7 @@ async fn send_data_over_can(
         error!("failed creating frame");
         return;
     };
-    let r = can.write(&frame).await;
+    let _ = can.write(&frame).await;
 }
 
 async fn init_can(resourses: CanResources) -> Can<'static> {

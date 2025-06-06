@@ -12,7 +12,6 @@ use embassy_stm32::can::{
     Frame, Id, Rx0InterruptHandler, Rx1InterruptHandler, SceInterruptHandler, StandardId,
     TxInterruptHandler,
 };
-use embassy_stm32::gpio::Output;
 use embassy_stm32::peripherals::CAN;
 use embassy_stm32::{can::Can, Config};
 use {defmt_rtt as _, panic_probe as _};
@@ -49,12 +48,6 @@ async fn main(_spawner: Spawner) {
         let result = can.read().await;
         info!("{:?}", result);
     }
-    let mut output = Output::new(
-        p.PC13,
-        embassy_stm32::gpio::Level::High,
-        embassy_stm32::gpio::Speed::Low,
-    );
-    output.toggle();
 }
 fn create_frame(target: u16, command: u16, remote: bool, data: u16) -> Frame {
     let id = target | (command << 8);

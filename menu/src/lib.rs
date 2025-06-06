@@ -32,6 +32,7 @@ pub trait Sensor<B>: Sized {
     fn get_id(&self) -> u8;
     fn increase_setting(self, builder: B) -> Option<Self>;
     fn decrease_setting(self, builder: B) -> Option<Self>;
+    #[allow(async_fn_in_trait)]
     async fn populate(self, builder: B) -> Option<Self>;
 }
 
