@@ -4,7 +4,6 @@
 
 #![no_std]
 #![no_main]
-mod debounce;
 
 use core::cell::RefCell;
 use core::panic;
@@ -19,11 +18,10 @@ use defmt::unwrap;
 use embassy_executor::Spawner;
 use embassy_futures::select;
 use embassy_rp::gpio::{Input, Level, Output, Pull};
-use embassy_rp::pac::common;
-use embassy_rp::peripherals::{self, DMA_CH0, PIO0, PIO1, SPI0, USB};
+use embassy_rp::peripherals::{self, DMA_CH0, I2C1, PIO0, PIO1, SPI0, USB};
 use embassy_rp::pio::{InterruptHandler, Pio};
 use embassy_rp::pio_programs::rotary_encoder::{Direction, PioEncoder, PioEncoderProgram};
-use embassy_rp::spi::{Blocking, Spi};
+use embassy_rp::spi::Spi;
 use embassy_rp::usb::Driver;
 use embassy_rp::{Peri, i2c};
 use embassy_rp::{bind_interrupts, spi};
@@ -35,6 +33,7 @@ use embedded_can::Frame;
 use embedded_hal_bus::spi::ExclusiveDevice;
 use embedded_sdmmc::{SdCard, VolumeIdx, VolumeManager};
 use heapless::String;
+use lcd_lcm1602_i2c::sync_lcd::Lcd;
 use log::*;
 use mcp2515::frame::CanFrame;
 use mcp2515::*;
@@ -50,7 +49,7 @@ type CanBus = MCP2515<
     embassy_embedded_hal::shared_bus::blocking::spi::SpiDevice<
         'static,
         NoopRawMutex,
-        Spi<'static, SPI0, Blocking>,
+        Spi<'static, SPI0, spi::Blocking>,
         Output<'static>,
     >,
 >;
@@ -178,7 +177,6 @@ async fn main(spawner: Spawner) {
     let driver = Driver::new(p.USB, Irqs);
     unwrap!(spawner.spawn(cyw43_task(runner)));
     unwrap!(spawner.spawn(logger(driver)));
-    error!("got here");
     info!("hello");
     control.init(clm).await;
     control
@@ -248,38 +246,63 @@ struct SensorBuilder {
     can_tx: CanSender,
     can_rx: CanReceiver,
 }
-#[derive(Clone, Copy)]
-struct MenuSensor {
-    builder: SensorBuilder,
-    id: u8,
-}
-impl Sensor<SensorBuilder> for MenuSensor {
-    fn first(builder: SensorBuilder) -> Self {
-        let id = builder.sensors.lock(|cell| cell.borrow().first_index());
-        match id {
-            Some(id) => Self {
-                builder: builder,
-                id: id as u8,
-            },
-            None => Self {
-                id: 0,
-                builder: builder,
-            },
+impl SensorBuilder {
+    fn lean_sensor_from_id(self, id: Option<usize>) -> Option<MenuSensor> {
+        if let Some(id) = id {
+            if self.sensors.lock(|map| map.borrow().get(id as usize)) {
+                return Some(MenuSensor {
+                    builder: self,
+                    id: id as u8,
+                    threshold: None,
+                });
+            }
+        }
+        // id = 0 shows that no sensor was found
+        None
+    }
+    // try to get the threshold for this sensor, if it failes return none
+    async fn populate(mut self, mut sensor: MenuSensor) -> Option<MenuSensor> {
+        if let Some(threshold) = get_value(
+            &mut self.can_tx,
+            &mut self.can_rx,
+            Commands::Threshold,
+            sensor.id,
+            &self.sensors,
+        )
+        .await
+        {
+            sensor.threshold = Some(threshold);
+            Some(sensor)
+        } else {
+            None
         }
     }
-    fn next(self, builder: SensorBuilder) -> Self {
+}
+#[derive(Clone)]
+struct MenuSensor {
+    #[allow(dead_code)]
+    builder: SensorBuilder,
+    id: u8,
+    threshold: Option<u16>,
+}
+impl Sensor<SensorBuilder> for MenuSensor {
+    fn first(builder: SensorBuilder) -> Option<Self> {
+        let id = builder.sensors.lock(|cell| cell.borrow().first_index());
+        builder.lean_sensor_from_id(id)
+    }
+    fn next(self, builder: SensorBuilder) -> Option<Self> {
         let id = builder
             .sensors
             .lock(|cell| cell.borrow().next_index(self.id as usize));
         match id {
-            Some(id) => Self {
-                id: id as u8,
-                builder: builder,
-            },
+            Some(id) => builder.lean_sensor_from_id(Some(id)),
             None => Sensor::first(builder),
         }
     }
-    fn prev(self, builder: SensorBuilder) -> Self {
+    async fn populate(self, builder: SensorBuilder) -> Option<Self> {
+        builder.populate(self).await
+    }
+    fn prev(self, builder: SensorBuilder) -> Option<Self> {
         let id = builder.sensors.lock(|cell| {
             let mut id = cell.borrow().prev_index(self.id as usize);
             if id.is_none() {
@@ -287,44 +310,70 @@ impl Sensor<SensorBuilder> for MenuSensor {
             }
             id
         });
-        match id {
-            Some(id) => Self {
-                id: id as u8,
-                builder: builder,
-            },
-            None => Self {
-                id: 0,
-                builder: builder,
-            },
-        }
+        builder.lean_sensor_from_id(id)
     }
-    async fn get_setting(&self) -> u16 {
-        get_value(
-            &mut self.builder.can_tx,
-            &mut self.builder.can_rx,
-            Commands::Threshold,
-            self.id,
-            builder.sensors,
-        )
-        .await
+    fn get_setting(&self) -> u16 {
+        self.threshold.unwrap_or(0)
     }
     fn get_id(&self) -> u8 {
-        19
+        self.id
     }
-    fn increase_setting(self, builder: SensorBuilder) -> Self {
-        Self {}
+    fn increase_setting(mut self, mut _builder: SensorBuilder) -> Option<Self> {
+        if let Some(threshold) = self.threshold {
+            self.threshold = Some(threshold.saturating_add(1));
+        } else {
+            self.threshold = None
+        }
+        Some(self)
     }
-    fn decrease_setting(self, builder: SensorBuilder) -> Self {
-        Self {}
+    fn decrease_setting(mut self, mut _builder: SensorBuilder) -> Option<Self> {
+        if let Some(threshold) = self.threshold {
+            self.threshold = Some(threshold.saturating_sub(1));
+        } else {
+            self.threshold = None
+        }
+        Some(self)
+    }
+}
+impl Drop for MenuSensor {
+    fn drop(&mut self) {
+        if let Some(threshold) = self.threshold {
+            let mut tx = self.builder.can_tx;
+            set_value(&mut tx, Commands::Threshold, threshold, self.id)
+        }
+    }
+}
+fn write_two_lines(
+    lcd: &mut Lcd<'_, i2c::I2c<'_, I2C1, i2c::Blocking>, embassy_time::Delay>,
+    text: &str,
+) {
+    let _ = lcd.clear();
+    let _ = lcd.set_cursor(0, 0);
+    let (first, second) = match text.split_once(|c| c == '\n') {
+        Some((first, second)) => (first, second),
+        None => (text, ""),
+    };
+    match lcd.write_str(first) {
+        Ok(_) => {}
+        Err(e) => {
+            info!("{:?}", e);
+        }
+    }
+    let _ = lcd.set_cursor(1, 0);
+    match lcd.write_str(second) {
+        Ok(_) => {}
+        Err(e) => {
+            info!("{:?}", e);
+        }
     }
 }
 #[embassy_executor::task]
 async fn menu_handle(
-    mut can_tx: CanSender,
-    mut can_rx: CanReceiver,
+    can_tx: CanSender,
+    can_rx: CanReceiver,
     sensors: &'static SensorBitmap,
-    mut display_resources: DisplayI2C,
-    mut menu_resources: MenuInput,
+    display_resources: DisplayI2C,
+    menu_resources: MenuInput,
 ) {
     const ADDR: u8 = 0x27;
     let mut runner: MenuRunner<_, SensorBuilder> =
@@ -370,29 +419,12 @@ async fn menu_handle(
     );
 
     loop {
+        runner.update().await;
         let mut buffer: String<33> = String::new();
         let Ok(_) = core::writeln!(&mut buffer, "{}\nnewline", runner) else {
             break;
         };
-        let _ = lcd.clear();
-        lcd.set_cursor(0, 0);
-        let (first, second) = match buffer.split_once(|c| c == '\n') {
-            Some((first, second)) => (first, second),
-            None => (buffer.as_str(), ""),
-        };
-        match lcd.write_str(first) {
-            Ok(_) => {}
-            Err(e) => {
-                info!("{:?}", e);
-            }
-        }
-        lcd.set_cursor(1, 0);
-        match lcd.write_str(second) {
-            Ok(_) => {}
-            Err(e) => {
-                info!("{:?}", e);
-            }
-        }
+        write_two_lines(&mut lcd, buffer.as_str());
         info!("waiting");
         match embassy_futures::select::select3(
             back_button.wait_for_rising_edge(),
@@ -403,24 +435,25 @@ async fn menu_handle(
         {
             select::Either3::First(_) => {
                 info!("back");
-                runner.input(menu::Input::Back);
+                runner.input(menu::Input::Back).await;
             }
             select::Either3::Second(_) => {
                 info!("enter");
-                runner.input(menu::Input::Enter);
+                runner.input(menu::Input::Enter).await;
             }
             select::Either3::Third(Direction::Clockwise) => {
                 info!("right");
-                runner.input(menu::Input::Right);
+                runner.input(menu::Input::Right).await;
             }
             select::Either3::Third(Direction::CounterClockwise) => {
                 info!("left");
-                runner.input(menu::Input::Left);
+                runner.input(menu::Input::Left).await;
             }
         }
     }
 }
 
+#[allow(dead_code)]
 struct DummyTimesource();
 
 impl embedded_sdmmc::TimeSource for DummyTimesource {
@@ -702,13 +735,18 @@ async fn can_task(
 }
 
 // can set and get values
-async fn set_value(
+fn set_value(
     can_tx: &mut CanSender,
     command: Commands,
     data: can_contract::CanData,
     dev_id: can_contract::DevId,
 ) {
-    can_tx.send((command, dev_id, CanPayload::Data(data))).await
+    if let Err(e) = can_tx.try_send((command, dev_id, CanPayload::Data(data))) {
+        error!(
+            "failed setting value for {:?}, dev_id {}, data {}, {:?}",
+            command, dev_id, data, e
+        );
+    };
 }
 async fn get_value(
     can_tx: &mut CanSender,
@@ -737,7 +775,8 @@ async fn get_value(
 }
 async fn init_can(can_resources: SpiCan) -> CanBus {
     info!("initiating can");
-    static SPI_CAN_BUS: StaticCell<NoopMutex<RefCell<Spi<SPI0, Blocking>>>> = StaticCell::new();
+    static SPI_CAN_BUS: StaticCell<NoopMutex<RefCell<Spi<SPI0, spi::Blocking>>>> =
+        StaticCell::new();
     let config = spi::Config::default();
     info!("creating spi device");
     let spi = Spi::new_blocking(
