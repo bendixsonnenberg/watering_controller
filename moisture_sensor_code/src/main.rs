@@ -336,6 +336,7 @@ async fn init_can(resourses: CanResources) -> Can<'static> {
         .set_silent(false);
     can.enable().await;
     info!("sending announcement");
+    Timer::after_millis(dev_id as u64 * 10).await;
     send_data_over_can(&mut can, 0, Commands::Announce, CONTROLLER_ID, dev_id).await;
     can
 }

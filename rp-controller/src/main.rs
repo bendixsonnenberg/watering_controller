@@ -217,19 +217,13 @@ async fn main(spawner: Spawner) {
         r.display_i2c,
         r.menu_input
     )));
-    // populate the bitmap,
-    // we want to do this before the other tasks are spawned to reduce the chance of the channels
-    // overflowing
-    // poll_sensors(can_send_tx).await;
 
-    info!("after menu task");
-    Timer::after_millis(50).await;
-    // unwrap!(spawner.spawn(sd_card_log(
-    //     can_send_tx,
-    //     can_receive_rx,
-    //     sensors,
-    //     r.spi_sdcard
-    // )));
+    unwrap!(spawner.spawn(sd_card_log(
+        can_send_tx,
+        can_receive_rx,
+        sensors,
+        r.spi_sdcard
+    )));
 
     let delay = Duration::from_millis(250);
     loop {
@@ -410,7 +404,7 @@ async fn menu_handle(
         Err(e) => {
             error!("failed at init of i2c: {:?}", e);
             Timer::after_millis(50).await;
-            panic!();
+            return;
         }
     };
     let mut back_button = Input::new(menu_resources.back, Pull::Up);
@@ -524,62 +518,65 @@ async fn sd_card_log(
             continue;
         };
 
-        let Ok(_) = log_file
-            .write(b"time, moisture1, moisture2, threshold, hysterese, backoff, wateringTime\n")
-        else {
-            continue;
-        };
-        let Ok(_) = log_file.flush() else {
-            continue;
-        };
         let mut ticker = Ticker::every(Duration::from_secs_floor(30));
         loop {
             let time = Instant::now().as_secs();
-            let moisture1;
-            let moisture2;
-            let threshold;
-            let hysterese;
-            let backoff;
-            let watering_time;
             // we need to drop can after using it
+            let mut buf: String<32> = String::new();
+
+            let Ok(_) = core::write!(&mut buf, "Time: {}", time) else {
+                error!("failed writing time");
+                break;
+            };
+            let mut failed = false;
             {
-                moisture1 =
-                    get_value(&mut can_tx, &mut can_rx, Commands::Moisture, 1, sensors).await;
-                moisture2 =
-                    get_value(&mut can_tx, &mut can_rx, Commands::Moisture, 2, sensors).await;
-                threshold =
-                    get_value(&mut can_tx, &mut can_rx, Commands::Threshold, 1, sensors).await;
-                hysterese =
-                    get_value(&mut can_tx, &mut can_rx, Commands::Hysterese, 1, sensors).await;
-                backoff =
-                    get_value(&mut can_tx, &mut can_rx, Commands::BackoffTime, 1, sensors).await;
-                watering_time =
-                    get_value(&mut can_tx, &mut can_rx, Commands::WateringTime, 1, sensors).await;
+                let sensors_map = sensors.lock(|sensor| sensor.borrow().clone());
+                let mut buffer: String<64> = String::new();
+                for sensor in sensors_map.into_iter() {
+                    let id = sensor as u8;
+                    let Some(moisture) =
+                        get_value(&mut can_tx, &mut can_rx, Commands::Moisture, id, sensors).await
+                    else {
+                        continue;
+                    };
+                    let Some(threshold) =
+                        get_value(&mut can_tx, &mut can_rx, Commands::Threshold, id, sensors).await
+                    else {
+                        continue;
+                    };
+                    let Ok(_) = core::write!(
+                        &mut buffer,
+                        "Sen: {}, Thr: {}, Mo: {}",
+                        id,
+                        moisture,
+                        threshold
+                    ) else {
+                        failed = true;
+                        break;
+                    };
+                    let Ok(_) = log_file.write(buffer.as_bytes()) else {
+                        failed = true;
+                        break;
+                    };
+                }
+                if failed {
+                    error!("failed writing to sd card");
+
+                    break;
+                }
+                let Ok(_) = log_file.write("\n".as_bytes()) else {
+                    error!("failed newline");
+                    break;
+                };
+                let Ok(_) = log_file.flush() else {
+                    error!("failed flushing");
+                    break;
+                };
             }
             // N needs to be large enough to hold all possible content written in the following
             // line
             // len(time) + 4 (moist1) + 4 (moist2) + 4(threshold) + 1 (hyst) + 2(backoff) +
             // 2(watering_time) + 2*6(, ) = len(time) + 29
-            let mut buffer: String<64> = String::new();
-            let Ok(_) = core::writeln!(
-                &mut buffer,
-                "{}, {}, {}, {}, {}, {}, {}",
-                time,
-                moisture1.unwrap_or(0),
-                moisture2.unwrap_or(0),
-                threshold.unwrap_or(0),
-                hysterese.unwrap_or(0),
-                backoff.unwrap_or(0),
-                watering_time.unwrap_or(0),
-            ) else {
-                break;
-            };
-            let Ok(_) = log_file.write(buffer.as_bytes()) else {
-                break;
-            };
-            let Ok(_) = log_file.flush() else {
-                break;
-            };
             ticker.next().await;
         }
         error!("failed at logging");
@@ -587,10 +584,12 @@ async fn sd_card_log(
     }
 }
 
+#[embassy_executor::task]
 async fn poll_sensors(can_tx: CanSender) {
     for i in 1..DevId::MAX {
         // id 0 is the controller
         // ask every id if it exists
+        info!("polling: {}", i);
         can_tx
             .send((Commands::Announce, i, CanPayload::Remote))
             .await;
@@ -828,13 +827,11 @@ async fn init_can(can_resources: SpiCan) -> CanBus {
         return can;
     }; // controller
     info!("set filter");
-    Timer::after_millis(50).await;
     // gets t have id 0
     let Ok(_) = can.set_mask(filter::RxMask::Mask0, embedded_can::Id::Standard(MASK)) else {
         return can;
     };
     info!("set mask");
-    Timer::after_millis(50).await;
     // this enables the interrupt for RX0IE, RX1IE, MERRE, ERRE
     // we only want intterupts for receiving
     match can.init(&mut Delay, settings) {
@@ -846,9 +843,6 @@ async fn init_can(can_resources: SpiCan) -> CanBus {
         }
     };
     info!("initilized can");
-    Timer::after_millis(50).await;
 
-    info!("successful initilization");
-    Timer::after_millis(50).await;
     can
 }
