@@ -6,8 +6,8 @@
 #![no_main]
 
 use core::cell::RefCell;
+use core::panic;
 use core::sync::atomic::AtomicU16;
-use core::{panic, result};
 
 use assign_resources::*;
 use bitmaps::Bitmap;
@@ -248,6 +248,7 @@ impl SensorBuilder {
                     builder: self,
                     id: id as u8,
                     threshold: None,
+                    moisture: None,
                 });
             }
         }
@@ -270,11 +271,25 @@ impl SensorBuilder {
         .await
         {
             sensor.threshold = Some(threshold);
-            Some(sensor)
         } else {
             error!("failed at getting threshold value");
-            None
+            return None;
         }
+        if let Some(moisture) = get_value(
+            &mut self.can_tx,
+            &mut self.can_rx,
+            Commands::Moisture,
+            sensor.id,
+            &self.sensors,
+        )
+        .await
+        {
+            sensor.moisture = Some(moisture);
+        } else {
+            error!("failed at getting moisture");
+            return None;
+        }
+        Some(sensor)
     }
 }
 #[derive(Clone)]
@@ -283,6 +298,7 @@ struct MenuSensor {
     builder: SensorBuilder,
     id: u8,
     threshold: Option<u16>,
+    moisture: Option<u16>,
 }
 impl Sensor<SensorBuilder> for MenuSensor {
     fn first(builder: SensorBuilder) -> Option<Self> {
@@ -316,6 +332,9 @@ impl Sensor<SensorBuilder> for MenuSensor {
     }
     fn get_id(&self) -> u8 {
         self.id
+    }
+    fn get_status(&self) -> u16 {
+        self.moisture.unwrap_or(0)
     }
     fn increase_setting(mut self, mut _builder: SensorBuilder) -> Option<Self> {
         info!("increase");

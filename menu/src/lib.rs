@@ -28,6 +28,7 @@ pub trait Sensor<B>: Sized {
     fn next(self, builder: B) -> Option<Self>;
     fn prev(self, builder: B) -> Option<Self>;
     fn get_setting(&self) -> u16;
+    fn get_status(&self) -> u16;
     fn get_id(&self) -> u8;
     fn increase_setting(self, builder: B) -> Option<Self>;
     fn decrease_setting(self, builder: B) -> Option<Self>;
@@ -94,7 +95,13 @@ impl<T: Sensor<B> + Clone, B> Display for MenuRunner<T, B> {
             State::SensorsSelect => write!(f, "Sensors"),
             State::Errors => write!(f, "errors"),
             State::SensorSelection(Some(sensor)) => {
-                write!(f, "Sen:{}Thr:{}", sensor.get_id(), sensor.get_setting())
+                write!(
+                    f,
+                    "Sen:{}Thr:{}\nMo:{}",
+                    sensor.get_id(),
+                    sensor.get_setting(),
+                    sensor.get_status()
+                )
             }
             State::SensorSelection(None) | State::SensorSettings(None) => {
                 write!(f, "missing\ngo back")
