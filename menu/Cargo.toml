@@ -1,0 +1,13 @@
+[package]
+name = "menu"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "menu"
+version = "0.1.0"
+path = "src/lib.rs"
+[[example]]
+name = "cli"
+[dependencies]
+can_contract = { version = "0.1.0", path = "../can_contract" }

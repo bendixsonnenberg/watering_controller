@@ -6,49 +6,78 @@
 #![no_main]
 
 use core::cell::RefCell;
+use core::sync::atomic::AtomicU16;
 use core::{panic, result};
 
 use assign_resources::*;
+use bitmaps::Bitmap;
 use can_contract::*;
 use core::fmt::Write;
 use cyw43_pio::{DEFAULT_CLOCK_DIVIDER, PioSpi};
 use defmt::unwrap;
 use embassy_executor::Spawner;
-use embassy_rp::Peri;
-use embassy_rp::adc::{Adc, Channel, Sample};
-use embassy_rp::gpio::{Level, Output};
-use embassy_rp::peripherals::{self, DMA_CH0, PIO0, SPI1, USB};
+use embassy_futures::select;
+use embassy_rp::gpio::{Input, Level, Output, Pull};
+use embassy_rp::peripherals::{self, DMA_CH0, I2C1, PIO0, PIO1, SPI0, USB};
 use embassy_rp::pio::{InterruptHandler, Pio};
-use embassy_rp::spi::{Blocking, Spi};
+use embassy_rp::pio_programs::rotary_encoder::{Direction, PioEncoder, PioEncoderProgram};
+use embassy_rp::spi::Spi;
 use embassy_rp::usb::Driver;
+use embassy_rp::{Peri, i2c};
 use embassy_rp::{bind_interrupts, spi};
 use embassy_sync::blocking_mutex::NoopMutex;
-use embassy_sync::blocking_mutex::raw::NoopRawMutex;
-use embassy_time::{Delay, Duration, Instant, Ticker, Timer};
+use embassy_sync::blocking_mutex::raw::{NoopRawMutex, ThreadModeRawMutex};
+use embassy_sync::channel::TrySendError;
+use embassy_time::{Delay, Duration, Instant, Ticker, Timer, WithTimeout};
 use embedded_can::Frame;
 use embedded_hal_bus::spi::ExclusiveDevice;
 use embedded_sdmmc::{SdCard, VolumeIdx, VolumeManager};
 use heapless::String;
+use lcd_lcm1602_i2c::sync_lcd::Lcd;
 use log::*;
 use mcp2515::frame::CanFrame;
 use mcp2515::*;
+use menu::{MenuRunner, Sensor};
 use static_cell::StaticCell;
 use {defmt_rtt as _, panic_probe as _};
-const REFERENCE_RESISTOR_OHM: u16 = 100;
-const ADC_JITTER_ALLOWANCE: u16 = 200; // the amount the adc reading has to differ for it to be
 // considred changed
-const ADC_MAX: u16 = 4096;
-const CONTROLLER_DEV_ID: u8 = 0;
+const CONTROLLER_DEV_ID: DevId = 0;
+const TX_BACKOFF_TIME: u64 = 5; // time to wait if no tx buffer is available in ms
+const CHANNEL_SIZE: usize = 100;
+
 type CanBus = MCP2515<
     embassy_embedded_hal::shared_bus::blocking::spi::SpiDevice<
         'static,
         NoopRawMutex,
-        Spi<'static, SPI1, Blocking>,
+        Spi<'static, SPI0, spi::Blocking>,
         Output<'static>,
     >,
 >;
-type CanBusMutex =
-    embassy_sync::mutex::Mutex<embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex, CanBus>;
+type CanChannelData = (Commands, can_contract::DevId, CanPayload);
+#[derive(Debug)]
+enum CanPayload {
+    Remote,
+    Data(can_contract::CanData),
+}
+type CanChannel = embassy_sync::channel::Channel<ThreadModeRawMutex, CanChannelData, CHANNEL_SIZE>;
+type CanSender =
+    embassy_sync::channel::Sender<'static, ThreadModeRawMutex, CanChannelData, CHANNEL_SIZE>;
+type CanReceiver =
+    embassy_sync::channel::Receiver<'static, ThreadModeRawMutex, CanChannelData, CHANNEL_SIZE>;
+/// type that contains all information for sending frame;
+type SensorBitmap = embassy_sync::blocking_mutex::Mutex<ThreadModeRawMutex, RefCell<Bitmap<256>>>;
+
+/// struct for shared data
+struct DefaultSettings {
+    threshold: AtomicU16,
+    watering_time: AtomicU16,
+    backoff_time: AtomicU16,
+}
+static SHARED_SETTINGS: DefaultSettings = DefaultSettings {
+    threshold: AtomicU16::new(1800),
+    watering_time: AtomicU16::new(15),
+    backoff_time: AtomicU16::new(20),
+};
 // Program metadata for `picotool info`.
 // This isn't needed, but it's recommended to have these minimal entries.
 #[unsafe(link_section = ".bi_entries")]
@@ -64,32 +93,42 @@ pub static PICOTOOL_ENTRIES: [embassy_rp::binary_info::EntryAddr; 4] = [
 ];
 assign_resources! {
     spi_can: SpiCan {
-        spi: SPI1,
-        miso: PIN_8,
-        mosi: PIN_11,
-        clk: PIN_10,
-        cs: PIN_13
-    },
-    adcs: Adcs{
-        adc: ADC,
-        dma: DMA_CH1,
-        pin0: PIN_26,
-        pin1: PIN_27,
-        pin2: PIN_28,
-    },
-    spi_sdcard: SpiSdcard {
         spi: SPI0,
         miso: PIN_4,
         mosi: PIN_3,
         clk: PIN_2,
         cs: PIN_5,
-    }
+    },
+    can_int: CanInt {
+        int: PIN_6,
+    },
+    spi_sdcard: SpiSdcard {
+        spi: SPI1,
+        miso: PIN_8,
+        mosi: PIN_11,
+        clk: PIN_10,
+        cs: PIN_13,
+    },
+    display_i2c: DisplayI2C {
+        sda: PIN_18,
+        sdc: PIN_19,
+        i2c: I2C1,
+    },
+    menu_input: MenuInput {
+        back: PIN_16,
+        enter: PIN_22,
+        pio: PIO1,
+        encoder_clock: PIN_20,
+        encoder_dt: PIN_21,
+    },
 }
 
 bind_interrupts!(struct Irqs {
     PIO0_IRQ_0 => InterruptHandler<PIO0>;
+    PIO1_IRQ_0 => InterruptHandler<PIO1>;
     USBCTRL_IRQ => embassy_rp::usb::InterruptHandler<USB>;
     ADC_IRQ_FIFO => embassy_rp::adc::InterruptHandler;
+
 });
 
 #[embassy_executor::task]
@@ -143,18 +182,51 @@ async fn main(spawner: Spawner) {
     control
         .set_power_management(cyw43::PowerManagementMode::PowerSave)
         .await;
-    static CAN: StaticCell<CanBusMutex> = StaticCell::new();
 
     let can = init_can(r.spi_can).await;
 
-    let can = CAN.init(embassy_sync::mutex::Mutex::new(can));
+    static CAN_SEND_CHANNEL: CanChannel = CanChannel::new();
+    static CAN_RECEIVE_CHANNEL: CanChannel = CanChannel::new();
 
-    unwrap!(spawner.spawn(values_from_adc(can, r.adcs)));
-    unwrap!(spawner.spawn(sd_card_log(can, r.spi_sdcard)));
+    // this channel are the messages that go from some tasks to the can
+    let can_send_rx = CAN_SEND_CHANNEL.receiver();
+    let can_send_tx = CAN_SEND_CHANNEL.sender();
+    // this channel are the messages that go from the can to the tasks(sd_card_log)
+    let can_receive_rx = CAN_RECEIVE_CHANNEL.receiver();
+    let can_receive_tx = CAN_RECEIVE_CHANNEL.sender();
+    // setting up a bitmap of existing sensors
+    static SENSORS: StaticCell<SensorBitmap> = StaticCell::new();
+    let sensors = SENSORS.init(embassy_sync::blocking_mutex::Mutex::new(RefCell::new(
+        Bitmap::<256>::new(),
+    )));
+
+    unwrap!(spawner.spawn(can_task(
+        can,
+        Input::new(r.can_int.int, Pull::Up),
+        sensors,
+        can_receive_tx,
+        can_send_rx,
+        can_send_tx,
+    )));
+    info!("after can task");
+
+    unwrap!(spawner.spawn(menu_handle(
+        can_send_tx,
+        can_receive_rx,
+        sensors,
+        r.display_i2c,
+        r.menu_input
+    )));
+
+    unwrap!(spawner.spawn(sd_card_log(
+        can_send_tx,
+        can_receive_rx,
+        sensors,
+        r.spi_sdcard
+    )));
 
     let delay = Duration::from_millis(250);
     loop {
-        // TODO: add respawning the sd card task, if it terminated
         control.gpio_set(0, true).await;
         Timer::after(delay).await;
 
@@ -162,7 +234,229 @@ async fn main(spawner: Spawner) {
         Timer::after(delay).await;
     }
 }
+#[derive(Clone, Copy)]
+struct SensorBuilder {
+    sensors: &'static SensorBitmap,
+    can_tx: CanSender,
+    can_rx: CanReceiver,
+}
+impl SensorBuilder {
+    fn lean_sensor_from_id(self, id: Option<usize>) -> Option<MenuSensor> {
+        if let Some(id) = id {
+            if self.sensors.lock(|map| map.borrow().get(id as usize)) {
+                return Some(MenuSensor {
+                    builder: self,
+                    id: id as u8,
+                    threshold: None,
+                });
+            }
+        }
+        // id = 0 shows that no sensor was found
+        None
+    }
+    // try to get the threshold for this sensor, if it failes return none
+    async fn populate(mut self, mut sensor: MenuSensor) -> Option<MenuSensor> {
+        info!(
+            "populating with: id: {}, threshold: {:?}",
+            sensor.id, sensor.threshold
+        );
+        if let Some(threshold) = get_value(
+            &mut self.can_tx,
+            &mut self.can_rx,
+            Commands::Threshold,
+            sensor.id,
+            &self.sensors,
+        )
+        .await
+        {
+            sensor.threshold = Some(threshold);
+            Some(sensor)
+        } else {
+            error!("failed at getting threshold value");
+            None
+        }
+    }
+}
+#[derive(Clone)]
+struct MenuSensor {
+    #[allow(dead_code)]
+    builder: SensorBuilder,
+    id: u8,
+    threshold: Option<u16>,
+}
+impl Sensor<SensorBuilder> for MenuSensor {
+    fn first(builder: SensorBuilder) -> Option<Self> {
+        let id = builder.sensors.lock(|cell| cell.borrow().first_index());
+        builder.lean_sensor_from_id(id)
+    }
+    fn next(self, builder: SensorBuilder) -> Option<Self> {
+        let id = builder
+            .sensors
+            .lock(|cell| cell.borrow().next_index(self.id as usize));
+        match id {
+            Some(id) => builder.lean_sensor_from_id(Some(id)),
+            None => Sensor::first(builder),
+        }
+    }
+    async fn populate(self, builder: SensorBuilder) -> Option<Self> {
+        builder.populate(self).await
+    }
+    fn prev(self, builder: SensorBuilder) -> Option<Self> {
+        let id = builder.sensors.lock(|cell| {
+            let mut id = cell.borrow().prev_index(self.id as usize);
+            if id.is_none() {
+                id = cell.borrow().last_index();
+            }
+            id
+        });
+        builder.lean_sensor_from_id(id)
+    }
+    fn get_setting(&self) -> u16 {
+        self.threshold.unwrap_or(0)
+    }
+    fn get_id(&self) -> u8 {
+        self.id
+    }
+    fn increase_setting(mut self, mut _builder: SensorBuilder) -> Option<Self> {
+        info!("increase");
+        if let Some(threshold) = self.threshold {
+            self.threshold = Some(threshold.saturating_add(1));
+        } else {
+            self.threshold = None
+        }
+        self.send_over_can();
+        Some(self)
+    }
+    fn decrease_setting(mut self, mut _builder: SensorBuilder) -> Option<Self> {
+        info!("decrease");
+        if let Some(threshold) = self.threshold {
+            self.threshold = Some(threshold.saturating_sub(1));
+        } else {
+            self.threshold = None
+        }
+        self.send_over_can();
+        Some(self)
+    }
+}
 
+impl MenuSensor {
+    fn send_over_can(&mut self) {
+        if let Some(threshold) = self.threshold {
+            let mut tx = self.builder.can_tx;
+            set_value(&mut tx, Commands::Threshold, threshold, self.id)
+        }
+    }
+}
+fn write_two_lines(
+    lcd: &mut Lcd<'_, i2c::I2c<'_, I2C1, i2c::Blocking>, embassy_time::Delay>,
+    text: &str,
+) {
+    let _ = lcd.clear();
+    let _ = lcd.set_cursor(0, 0);
+    let (first, second) = match text.split_once(|c| c == '\n') {
+        Some((first, second)) => (first, second),
+        None => (text, ""),
+    };
+    match lcd.write_str(first) {
+        Ok(_) => {}
+        Err(e) => {
+            info!("{:?}", e);
+        }
+    }
+    let _ = lcd.set_cursor(1, 0);
+    match lcd.write_str(second) {
+        Ok(_) => {}
+        Err(e) => {
+            info!("{:?}", e);
+        }
+    }
+}
+#[embassy_executor::task]
+async fn menu_handle(
+    can_tx: CanSender,
+    can_rx: CanReceiver,
+    sensors: &'static SensorBitmap,
+    display_resources: DisplayI2C,
+    menu_resources: MenuInput,
+) {
+    const ADDR: u8 = 0x27;
+    let mut runner: MenuRunner<_, SensorBuilder> =
+        MenuRunner::<MenuSensor, SensorBuilder>::new(SensorBuilder {
+            sensors,
+            can_tx,
+            can_rx,
+        });
+    let mut i2c = i2c::I2c::new_blocking(
+        display_resources.i2c,
+        display_resources.sdc,
+        display_resources.sda,
+        i2c::Config::default(),
+    );
+    info!("created i2c");
+    let mut delay = embassy_time::Delay;
+    let mut lcd = match lcd_lcm1602_i2c::sync_lcd::Lcd::new(&mut i2c, &mut delay)
+        .with_address(ADDR)
+        .with_rows(2)
+        .with_cursor_on(false)
+        .init()
+    {
+        Ok(lcd) => lcd,
+        Err(e) => {
+            error!("failed at init of i2c: {:?}", e);
+            Timer::after_millis(50).await;
+            return;
+        }
+    };
+    let mut back_button = Input::new(menu_resources.back, Pull::Up);
+    let mut enter_button = Input::new(menu_resources.enter, Pull::Down);
+
+    let Pio {
+        mut common, sm0, ..
+    } = Pio::new(menu_resources.pio, Irqs);
+    let prg = PioEncoderProgram::new(&mut common);
+    let mut encoder = PioEncoder::new(
+        &mut common,
+        sm0,
+        menu_resources.encoder_clock,
+        menu_resources.encoder_dt,
+        &prg,
+    );
+
+    loop {
+        runner.update().await;
+        let mut buffer: String<33> = String::new();
+        let Ok(_) = core::writeln!(&mut buffer, "{}", runner) else {
+            break;
+        };
+        write_two_lines(&mut lcd, buffer.as_str());
+        match embassy_futures::select::select3(
+            back_button.wait_for_falling_edge(),
+            enter_button.wait_for_falling_edge(),
+            encoder.read(),
+        )
+        .await
+        {
+            select::Either3::First(_) => {
+                info!("back");
+                runner.input(menu::Input::Back).await;
+            }
+            select::Either3::Second(_) => {
+                info!("enter");
+                runner.input(menu::Input::Enter).await;
+            }
+            select::Either3::Third(Direction::Clockwise) => {
+                info!("left");
+                runner.input(menu::Input::Left).await;
+            }
+            select::Either3::Third(Direction::CounterClockwise) => {
+                info!("right");
+                runner.input(menu::Input::Right).await;
+            }
+        }
+    }
+}
+
+#[allow(dead_code)]
 struct DummyTimesource();
 
 impl embedded_sdmmc::TimeSource for DummyTimesource {
@@ -179,10 +473,14 @@ impl embedded_sdmmc::TimeSource for DummyTimesource {
 }
 
 #[embassy_executor::task]
-async fn sd_card_log(can: &'static CanBusMutex, mut sd_card_resources: SpiSdcard) {
+async fn sd_card_log(
+    mut can_tx: CanSender,
+    mut can_rx: CanReceiver,
+    sensors: &'static SensorBitmap,
+    mut sd_card_resources: SpiSdcard,
+) {
     // this overarching loop enables the sd card to be inserted later
     loop {
-        Timer::after_secs(1).await;
         let mut config = spi::Config::default();
         config.frequency = 400_000; // for initilization the frequency has to be below 400khz
         let spi = Spi::new_blocking(
@@ -193,20 +491,12 @@ async fn sd_card_log(can: &'static CanBusMutex, mut sd_card_resources: SpiSdcard
             config,
         );
         let cs = Output::new(sd_card_resources.cs.reborrow(), Level::High);
-        info!("got spi");
-        Timer::after_millis(500).await;
         let spi_dev = ExclusiveDevice::new_no_delay(spi, cs);
-        info!("got spi_dev");
-        Timer::after_millis(500).await;
 
         let sdcard = SdCard::new(spi_dev, embassy_time::Delay);
         sdcard.mark_card_uninit();
-        info!("got sd_card");
-        Timer::after_millis(500).await;
 
         let mut volume_mgr = VolumeManager::new(sdcard, DummyTimesource());
-        info!("got volume_mgr");
-        Timer::after_millis(500).await;
 
         let Ok(mut vol0) = volume_mgr.open_volume(VolumeIdx(0)) else {
             error!("Failed opening volume, not logging anymore, retrying");
@@ -228,63 +518,61 @@ async fn sd_card_log(can: &'static CanBusMutex, mut sd_card_resources: SpiSdcard
             continue;
         };
 
-        let Ok(_) = log_file
-            .write(b"time, moisture1, moisture2, threshold, hysterese, backoff, wateringTime\n")
-        else {
-            continue;
-        };
-        let Ok(_) = log_file.flush() else {
-            continue;
-        };
-        let mut ticker = Ticker::every(Duration::from_secs_floor(5));
+        let mut ticker = Ticker::every(Duration::from_secs_floor(30));
         loop {
             let time = Instant::now().as_secs();
-            let moisture1;
-            let moisture2;
-            let threshold;
-            let hysterese;
-            let backoff;
-            let watering_time;
             // we need to drop can after using it
+            let mut buf: String<32> = String::new();
+
+            let Ok(_) = core::write!(&mut buf, "Time: {}", time) else {
+                error!("failed writing time");
+                break;
+            };
+            let mut failed = false;
             {
-                let mut can = can.lock().await;
-                moisture1 = get_value(&mut can, Commands::Moisture, 1).await;
-                moisture2 = get_value(&mut can, Commands::Moisture, 2).await;
-                threshold = get_value(&mut can, Commands::Threshold, 1).await;
-                hysterese = get_value(&mut can, Commands::Hysterese, 1).await;
-                backoff = get_value(&mut can, Commands::BackoffTime, 1).await;
-                watering_time = get_value(&mut can, Commands::WateringTime, 1).await;
-            }
-            // N needs to be large enough to hold all possible content written in the following
-            // line
-            // len(time) + 4 (moist1) + 4 (moist2) + 4(threshold) + 1 (hyst) + 2(backoff) +
-            // 2(watering_time) + 2*6(, ) = len(time) + 29
-            let mut buffer: String<64> = String::new();
-            let Ok(_) = core::writeln!(
-                &mut buffer,
-                "{}, {}, {}, {}, {}, {}, {}",
-                time,
-                moisture1.unwrap_or(0),
-                moisture2.unwrap_or(0),
-                threshold.unwrap_or(0),
-                hysterese.unwrap_or(0),
-                backoff.unwrap_or(0),
-                watering_time.unwrap_or(0),
-            ) else {
-                break;
-            };
-            info!("LOG: {}", buffer.clone());
-            let res = log_file.write(buffer.clone().as_bytes());
-            match res {
-                Ok(_) => {}
-                Err(e) => {
-                    info!("{:?}", e);
+                let sensors_map = sensors.lock(|sensor| sensor.borrow().clone());
+                let mut buffer: String<64> = String::new();
+                for sensor in sensors_map.into_iter() {
+                    let id = sensor as u8;
+                    let Some(moisture) =
+                        get_value(&mut can_tx, &mut can_rx, Commands::Moisture, id, sensors).await
+                    else {
+                        continue;
+                    };
+                    let Some(threshold) =
+                        get_value(&mut can_tx, &mut can_rx, Commands::Threshold, id, sensors).await
+                    else {
+                        continue;
+                    };
+                    let Ok(_) = core::write!(
+                        &mut buffer,
+                        "Sen: {}, Thr: {}, Mo: {}",
+                        id,
+                        moisture,
+                        threshold
+                    ) else {
+                        failed = true;
+                        break;
+                    };
+                    let Ok(_) = log_file.write(buffer.as_bytes()) else {
+                        failed = true;
+                        break;
+                    };
                 }
+                if failed {
+                    error!("failed writing to sd card");
+
+                    break;
+                }
+                let Ok(_) = log_file.write("\n".as_bytes()) else {
+                    error!("failed newline");
+                    break;
+                };
+                let Ok(_) = log_file.flush() else {
+                    error!("failed flushing");
+                    break;
+                };
             }
-            let Ok(_) = log_file.flush() else {
-                info!("failed flushing");
-                break;
-            };
             ticker.next().await;
         }
         error!("failed at logging");
@@ -293,172 +581,215 @@ async fn sd_card_log(can: &'static CanBusMutex, mut sd_card_resources: SpiSdcard
 }
 
 #[embassy_executor::task]
-async fn values_from_adc(can: &'static CanBusMutex, adc_ressources: Adcs) {
-    info!("starting adcs");
-    let mut adc = Adc::new(adc_ressources.adc, Irqs, embassy_rp::adc::Config::default());
-    let mut dma = adc_ressources.dma;
-
-    let channel0 = Channel::new_pin(adc_ressources.pin0, embassy_rp::gpio::Pull::None);
-    let channel1 = Channel::new_pin(adc_ressources.pin1, embassy_rp::gpio::Pull::None);
-    let channel2 = Channel::new_pin(adc_ressources.pin2, embassy_rp::gpio::Pull::None);
-
-    let mut channels = [channel1, channel2, channel0];
-    const SAMPLES: usize = 100;
-    const NUM_CHANNELS: usize = 3;
-    let mut old_r0 = 5000;
-    let mut old_r1 = 5000;
-    let mut old_r2 = 5000;
-    loop {
-        let mut buf = [Sample::default(); { SAMPLES * NUM_CHANNELS }];
-        let div = 48_000_000 / (100_000 * NUM_CHANNELS) - 1;
-
-        adc.read_many_multichannel_raw(&mut channels, &mut buf, div as u16, dma.reborrow())
+async fn poll_sensors(can_tx: CanSender) {
+    for i in 1..DevId::MAX {
+        // id 0 is the controller
+        // ask every id if it exists
+        info!("polling: {}", i);
+        can_tx
+            .send((Commands::Announce, i, CanPayload::Remote))
             .await;
-        trace!("read adc");
-        let delta = |(sum, count): (u32, u32), value: &Sample| {
-            if value.good() {
-                (sum + value.value() as u32, count + 1)
-            } else {
-                (sum, count)
-            }
+    }
+}
+/// sends settings to the given channel. May fail at sending if the channel is full
+fn send_settings_to_sensor(
+    dev_id: can_contract::DevId,
+    channel: CanSender,
+) -> Result<(), TrySendError<(Commands, can_contract::DevId, CanPayload)>> {
+    channel.try_send((
+        Commands::Threshold,
+        dev_id,
+        CanPayload::Data(
+            SHARED_SETTINGS
+                .threshold
+                .load(core::sync::atomic::Ordering::Relaxed),
+        ),
+    ))?;
+    channel.try_send((
+        Commands::WateringTime,
+        dev_id,
+        CanPayload::Data(
+            SHARED_SETTINGS
+                .watering_time
+                .load(core::sync::atomic::Ordering::Relaxed),
+        ),
+    ))?;
+    channel.try_send((
+        Commands::BackoffTime,
+        dev_id,
+        CanPayload::Data(
+            SHARED_SETTINGS
+                .backoff_time
+                .load(core::sync::atomic::Ordering::Relaxed),
+        ),
+    ))
+}
+/// handles all the can related stuff, mainly sending messages and routing incoming messages to the
+/// correct receiver
+#[embassy_executor::task]
+async fn can_task(
+    mut can: CanBus,
+    mut can_interrupt_pin: Input<'static>,
+    sensors: &'static SensorBitmap,
+    receive_channel: CanSender,
+    send_channel: CanReceiver,
+    self_send: CanSender,
+) {
+    loop {
+        // or create function for can bus that check the registers to see if there is a message
+        // ready as async
+        let Ok(status) = can.read_status() else {
+            Timer::after_millis(100).await;
+            continue;
         };
-        // deinterlacing buf so that only the results for a single pin are considered
-        let (sum, count) = buf.iter().step_by(NUM_CHANNELS).fold((0, 0), delta);
-        let v_0 = sum / count;
-        let r_0 = voltage_divider_resistance_upper(v_0, REFERENCE_RESISTOR_OHM);
-        let new_threshold = linear_correction(2000, 1000, 100, 4000, r_0);
-        let (sum, count) = buf.iter().skip(1).step_by(NUM_CHANNELS).fold((0, 0), delta);
-        let v_1 = sum / count;
-        let r_1 = voltage_divider_resistance_upper(v_1, REFERENCE_RESISTOR_OHM);
-        let new_watering_time = linear_correction(15, 90, 100, 10100, r_1);
-        let (sum, count) = buf.iter().skip(2).step_by(NUM_CHANNELS).fold((0, 0), delta);
-        let v_2 = sum / count;
-        let r_2 = voltage_divider_resistance_upper(v_2, REFERENCE_RESISTOR_OHM);
-        let new_backoff_time = linear_correction(5, 30, 100, 10100, r_2);
-        trace!(
-            "threshold: {}, {},{},| watering_time: {}, {}, {}| backoff_time: {}, {}, {}",
-            new_threshold, v_0, r_0, new_watering_time, v_1, r_1, new_backoff_time, v_2, r_2
-        );
-        if r_0.abs_diff(old_r0) > ADC_JITTER_ALLOWANCE {
-            old_r0 = r_0;
-            info!("have to update threshold");
-            let mut can = can.lock().await;
-            info!("got can");
-            set_value(&mut can, Commands::Threshold, new_threshold, 1);
-            set_value(&mut can, Commands::Threshold, new_threshold, 2);
+        // these futures can be blocked, so do not modify the channals in them or do something that
+        // changes a status
+
+        // check if we already have something to read, otherwise wait for interrupt
+        // info!("send channel full: {:?}", send_channel.is_full());
+        // info!("rx0if: {:?}, rx1if: {:?}", status.rx0if(), status.rx1if());
+        let receive_future = async {
+            if status.rx0if() || status.rx1if() {
+            } else {
+                can_interrupt_pin.wait_for_low().await
+            };
+            // delay if we wont be able to do anything with the message
+            // only a shot delay, because otherwise we miss messages on the bus
+            if send_channel.is_full() {
+                // this allows other tasks to do something with the message
+                Timer::after_millis(TX_BACKOFF_TIME).await;
+            };
+        };
+
+        let tranceive_future = async {
+            loop {
+                if can.find_free_tx_buf().is_ok() {
+                    break;
+                }
+                Timer::after_millis(TX_BACKOFF_TIME).await;
+            }
+            // after we can send something, wait until we have something to send.
+            send_channel.receive().await
+            // tx cant get full again because the only way to fill them is if this future finishes
+        };
+        match select::select(receive_future, tranceive_future).await {
+            select::Either::First(_) => {
+                // info!("got frame");
+                // reading from the can object also clears the interrupt bit for tranceive
+                // this leads to the interrupt pin being high again
+                // unless another message is already waiting in another receive buffer
+                let Ok(frame) = can.read_message() else {
+                    continue;
+                };
+                let Some(frame) = frame_to_command_data(frame) else {
+                    continue;
+                };
+                match frame {
+                    (Commands::Announce, Some(dev_id), _) => sensors.lock(|sensors| {
+                        // info!("got announcment fomr {}", dev_id);
+                        // tell everyone that this sensor is connected
+                        let mut s = sensors.borrow_mut();
+                        s.set(dev_id as usize, true);
+                        // info!("{:?}", s.first_index());
+                        // tell the new sensor what the settings are
+
+                        let _ = send_settings_to_sensor(dev_id, self_send);
+                    }),
+                    (command, Some(dev_id), Some(data)) => {
+                        // use try send here to avoid blocking the task from interacting with the
+                        // can
+                        let r = receive_channel.try_send((command, dev_id, CanPayload::Data(data)));
+                        match r {
+                            Ok(_) => {}
+                            Err(e) => {
+                                info!("{:?}", e);
+                            }
+                        }
+                    }
+                    (_command, Some(_dev_id), None) => {
+                        info!("received remote frame, need to handle it")
+                    }
+                    (_, _, _) => continue,
+                }
+            }
+            // transmit this message
+            select::Either::Second((command, dev_id, data)) => {
+                // we have a free tx buffer and we have got a message, so we should not encounter
+                // tx busy
+                info!(
+                    "sending can frame with: {:?}, id: {} data: {:?}",
+                    command, dev_id, data
+                );
+                let Some(id) = can_contract::id_from_command_and_dev_id(command, dev_id) else {
+                    continue;
+                };
+
+                let frame = match data {
+                    CanPayload::Remote => CanFrame::new_remote(id, can_contract::DLC),
+
+                    CanPayload::Data(data) => {
+                        let buf = can_contract::create_data_buf(data, CONTROLLER_DEV_ID);
+                        CanFrame::new(id, &buf)
+                    }
+                };
+                let Some(frame) = frame else { continue };
+
+                match can.send_message(frame) {
+                    Ok(_) => {
+                        info!("sent can message");
+                    }
+                    Err(e) => {
+                        info!("{:?}", e);
+                    }
+                }
+            }
         }
-        if r_1.abs_diff(old_r1) > ADC_JITTER_ALLOWANCE {
-            old_r1 = r_1;
-            info!("have to update watering time");
-            let mut can = can.lock().await;
-            set_value(&mut can, Commands::WateringTime, new_watering_time, 1);
-            set_value(&mut can, Commands::WateringTime, new_watering_time, 2);
-        }
-        if r_2.abs_diff(old_r2) > ADC_JITTER_ALLOWANCE {
-            old_r2 = r_2;
-            info!("have to update backoff_time");
-            let mut can = can.lock().await;
-            set_value(&mut can, Commands::BackoffTime, new_backoff_time, 1);
-            set_value(&mut can, Commands::BackoffTime, new_backoff_time, 2);
-        }
-        Timer::after_millis(100).await;
     }
 }
 
 // can set and get values
-fn set_value(can: &mut CanBus, command: Commands, data: u16, dev_id: u8) {
-    let Some(id) = can_contract::id_from_command_and_dev_id(command, dev_id) else {
-        return;
+fn set_value(
+    can_tx: &mut CanSender,
+    command: Commands,
+    data: can_contract::CanData,
+    dev_id: can_contract::DevId,
+) {
+    if let Err(e) = can_tx.try_send((command, dev_id, CanPayload::Data(data))) {
+        error!(
+            "failed setting value for {:?}, dev_id {}, data {}, {:?}",
+            command, dev_id, data, e
+        );
     };
-    let buf = can_contract::create_data_buf(data, CONTROLLER_DEV_ID);
-    let Some(frame) = CanFrame::new(id, &buf) else {
-        return;
-    };
-    match can.send_message(frame) {
-        Ok(_) => {
-            info!("sent can message")
-        }
-        Err(e) => {
-            info!("{:?}", e)
-        }
-    }
 }
-async fn get_value(can: &mut CanBus, command: Commands, dev_id: u8) -> Option<u16> {
-    let id = can_contract::id_from_command_and_dev_id(command, dev_id)?;
-    let frame = CanFrame::new_remote(id, 3)?;
-    match can.send_message(frame) {
-        Ok(_) => {
-            trace!("sent can message")
-        }
-        Err(e) => {
-            info!("{:?}", e);
-            return None;
-        }
+async fn get_value(
+    can_tx: &mut CanSender,
+    can_rx: &mut CanReceiver,
+    command: Commands,
+    dev_id: u8,
+    sensors: &SensorBitmap,
+) -> Option<can_contract::CanData> {
+    can_tx.send((command, dev_id, CanPayload::Remote)).await;
+
+    let Ok((r_command, r_source_id, CanPayload::Data(r_data))) = can_rx
+        .receive()
+        .with_timeout(Duration::from_millis(500))
+        .await
+    else {
+        // the sensor is not responding, remove it from the list of active sensors
+        //TODO: add error reporting
+        sensors.lock(|sensor| sensor.borrow_mut().set(dev_id as usize, false));
+        return None;
     };
 
-    Timer::after_millis(5).await; //TODO: this wait is here to let the other side answer, maybe do
-    //it smarter
-    while let Ok(frame) = can.read_message() {
-        if let Some((r_command, r_source_id, r_data)) = can_contract::frame_to_command_data(frame) {
-            if r_command == command && r_source_id.unwrap_or(CONTROLLER_DEV_ID) == dev_id {
-                return r_data;
-            }
-        }
+    if r_command == command && r_source_id == dev_id {
+        return Some(r_data);
     }
     None
 }
-// calculate the resistance of a unknown resistor, by using a known reference resistor. The
-// measured resistance is the resistor to voltage
-fn voltage_divider_resistance_upper(mesurement: u32, known: u16) -> u16 {
-    let alpha = known as u32 * ADC_MAX as u32;
-    // prevent division by 0
-    let mesurement = mesurement.max(1);
-    let division = (alpha) / mesurement;
-    (division as u16) - known
-}
-fn linear_correction(
-    corrected_min: u16,
-    corrected_max: u16,
-    in_min: u16,
-    in_max: u16,
-    input: u16,
-) -> u16 {
-    // Ensure the input is within the specified range
-    if input < in_min {
-        return corrected_min;
-    } else if input > in_max {
-        return corrected_max;
-    }
-
-    // Calculate the corrected value using linear interpolation
-    let slope = (corrected_max as f32 - corrected_min as f32) / (in_max as f32 - in_min as f32);
-    let corrected_value = slope * (input as f32 - in_min as f32) + corrected_min as f32;
-
-    // Convert the result back to u16 and return
-    corrected_value as u16
-}
-/*
-fn linear_correction(
-    corrected_min: u16,
-    corrected_max: u16,
-    in_min: u16,
-    in_max: u16,
-    input: u16,
-) -> u16 {
-    let m_upper = corrected_max.saturating_sub(corrected_min);
-    let m_lower = in_max.saturating_sub(in_min).max(1);
-    let b = m_upper.saturating_mul(in_min).saturating_div(corrected_min);
-    info!("m_0: {}, m_1: {}, b: {}", m_upper, m_lower, b);
-    let upper: u32 = (input as u32).saturating_mul(m_upper as u32);
-    let lower = upper.saturating_div(m_lower as u32);
-    let res = lower.saturating_sub(b as u32);
-    info!("upper: {}, lower: {}, res: {}", upper, lower, res);
-    res as u16
-}
-*/
 async fn init_can(can_resources: SpiCan) -> CanBus {
     info!("initiating can");
-    static SPI_CAN_BUS: StaticCell<NoopMutex<RefCell<Spi<SPI1, Blocking>>>> = StaticCell::new();
+    static SPI_CAN_BUS: StaticCell<NoopMutex<RefCell<Spi<SPI0, spi::Blocking>>>> =
+        StaticCell::new();
     let config = spi::Config::default();
     info!("creating spi device");
     let spi = Spi::new_blocking(
@@ -491,10 +822,14 @@ async fn init_can(can_resources: SpiCan) -> CanBus {
         info!("Failed to set filter ");
         return can;
     }; // controller
+    info!("set filter");
     // gets t have id 0
     let Ok(_) = can.set_mask(filter::RxMask::Mask0, embedded_can::Id::Standard(MASK)) else {
         return can;
     };
+    info!("set mask");
+    // this enables the interrupt for RX0IE, RX1IE, MERRE, ERRE
+    // we only want intterupts for receiving
     match can.init(&mut Delay, settings) {
         Ok(()) => {}
         Err(e) => {
@@ -503,6 +838,7 @@ async fn init_can(can_resources: SpiCan) -> CanBus {
             panic!("failed")
         }
     };
-    info!("successful initilization");
+    info!("initilized can");
+
     can
 }

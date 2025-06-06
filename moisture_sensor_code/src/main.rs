@@ -1,7 +1,7 @@
 #![no_std]
 #![no_main]
 
-use core::sync::atomic::{AtomicU16, Ordering};
+use core::sync::atomic::{AtomicU16, AtomicU8, Ordering};
 
 use assign_resources::assign_resources;
 use can::{
@@ -11,9 +11,14 @@ use can::{
 use can_contract::*;
 use defmt::*;
 use embassy_executor::Spawner;
-use embassy_stm32::interrupt::InterruptExt;
+
+use embassy_stm32::{
+    gpio::{AnyPin, Input},
+    interrupt::InterruptExt,
+};
 use embassy_stm32::{rcc::Sysclk, time::Hertz, *};
 use embassy_time::Timer;
+use embedded_hal_bus::i2c::AtomicDevice;
 use gpio::{Level, Output, Speed};
 
 use {defmt_rtt as _, panic_probe as _};
@@ -22,8 +27,8 @@ mod time_source;
 const LOG_INTERVAL: u64 = 5; // at n*LOG_INTERVAL seconds a log entry is written
 const CAN_BITRATE: u32 = 125_000; // bitrate for can bus. We are not transfering large amounts of
                                   // data ,so lets keep this low
+const CONTROLLER_ID: u8 = 0;
 
-const DEV_ID: u8 = 1; // will later be determined by shorted pins
 assign_resources! {
     valve_control: ValveResources {
         adc: ADC1,
@@ -35,12 +40,16 @@ assign_resources! {
         can_rx: PA11,
         can_tx: PA12,
     },
-    sd_card: SdCardResources {
-        spi: SPI1,
-        sclk: PA5,
-        miso: PA6,
-        mosi: PA7,
-        ss: PA9
+    dev_id: DevIdResources {
+        b0: PB11,
+        b1: PB10,
+        b2: PB1,
+        b3: PB0,
+        b4: PA7,
+        b5: PA6,
+        b6: PA5,
+        b7: PA4,
+
     }
 }
 #[derive(Default)]
@@ -58,6 +67,7 @@ static SHARED: SharedData = SharedData {
     watering_time: AtomicU16::new(30),
     backoff_time: AtomicU16::new(15),
 };
+static DEV_ID: AtomicU8 = AtomicU8::new(0);
 bind_interrupts!(struct Irqs {
     ADC1_2 => adc::InterruptHandler<peripherals::ADC1>;
     USB_LP_CAN1_RX0 => can::Rx0InterruptHandler<peripherals::CAN>;
@@ -76,6 +86,39 @@ async fn main(_spawner: Spawner) {
     config.rcc.sys = Sysclk::HSE;
     let p = embassy_stm32::init(config);
     let r = split_resources!(p);
+
+    // checking id
+    {
+        let r = r.dev_id;
+        let mut dev_id: u8 = 0;
+        let pull = gpio::Pull::Up;
+        // this is ugly, should fix later
+        let pins: [AnyPin; 7] = [
+            r.b0.into(),
+            r.b1.into(),
+            r.b2.into(),
+            r.b3.into(),
+            r.b4.into(),
+            r.b5.into(),
+            r.b6.into(),
+            // r.b7.into(),
+        ];
+        for pin in pins {
+            let input = Input::new(pin, pull);
+            if input.is_low() {
+                info!("is high");
+                dev_id += 1;
+            }
+            info!("dev_id:{}", dev_id);
+            dev_id *= 2;
+        }
+        if dev_id == 0 {
+            error!("dev_id is incorrect");
+            return;
+        }
+        DEV_ID.store(dev_id, Ordering::Relaxed);
+        info!("got device id: {}", dev_id);
+    }
 
     // setup relay
     _spawner.spawn(handle_valve(r.valve_control)).unwrap();
@@ -131,7 +174,7 @@ async fn handle_modify_threshold(can_resources: CanResources) {
     let mut can = init_can(can_resources).await;
     trace!("can initiated");
 
-    let dev_id = get_dev_id().await;
+    let dev_id = DEV_ID.load(Ordering::Relaxed);
     // send_data_over_can(&mut can, 16, Commands::Threshold, dev_id).await;
 
     loop {
@@ -159,7 +202,7 @@ async fn handle_modify_threshold(can_resources: CanResources) {
                             &mut can,
                             SHARED.threshold.load(Ordering::Relaxed),
                             command,
-                            0,
+                            CONTROLLER_ID,
                             dev_id,
                         )
                         .await;
@@ -180,7 +223,7 @@ async fn handle_modify_threshold(can_resources: CanResources) {
                             &mut can,
                             SHARED.hysterese.load(Ordering::Relaxed),
                             command,
-                            0,
+                            CONTROLLER_ID,
                             dev_id,
                         )
                         .await;
@@ -201,7 +244,7 @@ async fn handle_modify_threshold(can_resources: CanResources) {
                             &mut can,
                             SHARED.moisture.load(Ordering::Relaxed),
                             command,
-                            0,
+                            CONTROLLER_ID,
                             dev_id,
                         )
                         .await;
@@ -218,7 +261,7 @@ async fn handle_modify_threshold(can_resources: CanResources) {
                             &mut can,
                             SHARED.backoff_time.load(Ordering::Relaxed),
                             command,
-                            0,
+                            CONTROLLER_ID,
                             dev_id,
                         )
                         .await;
@@ -235,10 +278,19 @@ async fn handle_modify_threshold(can_resources: CanResources) {
                             &mut can,
                             SHARED.watering_time.load(Ordering::Relaxed),
                             command,
-                            0,
+                            CONTROLLER_ID,
                             dev_id,
                         )
                         .await;
+                    }
+                }
+                Commands::Announce => {
+                    info!("Received announce");
+                    if !frame.header().rtr() {
+                        // some other sensor sent a announcement with our device id.
+                        // just
+                    } else {
+                        send_data_over_can(&mut can, 0, command, CONTROLLER_ID, dev_id).await;
                     }
                 }
             }
@@ -264,13 +316,11 @@ async fn send_data_over_can(
     let r = can.write(&frame).await;
 }
 
-async fn get_dev_id() -> u8 {
-    DEV_ID
-}
 async fn init_can(resourses: CanResources) -> Can<'static> {
+    let dev_id = DEV_ID.load(Ordering::Relaxed);
     // first we define the filter, which will accept all messages directed at this device
     let mask = MASK;
-    let id = get_filter_from_id(get_dev_id().await); // id is 8 bit, this will later be determined by dip switches
+    let id = get_filter_from_id(dev_id); // id is 8 bit, this will later be determined by dip switches
     let mask: Mask16 = Mask16::frames_with_std_id(id, mask);
 
     let mut can = Can::new(resourses.can, resourses.can_rx, resourses.can_tx, Irqs);
@@ -285,5 +335,8 @@ async fn init_can(resourses: CanResources) -> Can<'static> {
         .set_loopback(false)
         .set_silent(false);
     can.enable().await;
+    info!("sending announcement");
+    Timer::after_millis(dev_id as u64 * 10).await;
+    send_data_over_can(&mut can, 0, Commands::Announce, CONTROLLER_ID, dev_id).await;
     can
 }

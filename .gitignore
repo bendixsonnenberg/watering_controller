@@ -29,5 +29,4 @@ rp-controller/hex1
 rp-controller/out1.uf2
 menu/Cargo.lock
 flake.lock
-hardware/rp_controller/rp_controller/rp_controller-backups/rp_controller-2025-06-04_231824.zip
-hardware/rp_controller/rp_controller/rp_controller-backups
+hardware

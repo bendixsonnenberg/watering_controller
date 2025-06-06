@@ -16,37 +16,47 @@ pub enum Commands {
     WateringTime = 3,
     // minimum time to wait between waterings in minutes
     BackoffTime = 4,
+    // new device adding itself, the controller is started, every id is tested, if new sensor is
+    // added announce itself to the world. If a new device is added and its id conflicts TODO
+    Announce = 5,
 }
+
+pub type DevId = u8;
+pub type CanData = u16;
 
 static COMMAND_MASK: u16 = 0b000_1111_1111;
 pub static MASK: StandardId = StandardId::new(COMMAND_MASK).unwrap();
-pub fn get_filter_from_id(id: u8) -> StandardId {
+pub const DLC: usize = 3;
+pub fn get_filter_from_id(id: DevId) -> StandardId {
     StandardId::new(id as u16).expect("u8 cant be larger than 11 bit number")
 }
-pub fn id_from_command_and_dev_id(command: Commands, id: u8) -> Option<StandardId> {
+pub fn id_from_command_and_dev_id(command: Commands, id: DevId) -> Option<StandardId> {
     StandardId::new(((command as u16) << 8) | id as u16)
 }
 /// extracts command, device_id of source and data from frame
 /// if not a standard frame, return None
-/// if the frame is not a data frame, the option<u16> will be none
-pub fn frame_to_command_data<U: Frame>(frame: U) -> Option<(Commands, Option<u8>, Option<u16>)> {
+/// if the frame is not a data frame, the option<CanData> will be none
+pub fn frame_to_command_data<U: Frame>(
+    frame: U,
+) -> Option<(Commands, Option<DevId>, Option<CanData>)> {
     let Id::Standard(id) = frame.id() else {
         return None;
     };
 
     let command = Commands::from_repr((id.as_raw().checked_shr(8)?) as u8)?;
-    let (data, dev_id): (Option<u16>, Option<u8>) = if frame.is_data_frame() && frame.dlc() >= 3 {
-        (
-            Some(byteorder::LittleEndian::read_u16(frame.data())),
-            Some(frame.data()[2]),
-        )
-    } else {
-        (None, None)
-    };
+    let (data, dev_id): (Option<CanData>, Option<DevId>) =
+        if frame.is_data_frame() && frame.dlc() >= DLC {
+            (
+                Some(byteorder::LittleEndian::read_u16(frame.data())),
+                Some(frame.data()[2]),
+            )
+        } else {
+            (None, None)
+        };
     Some((command, dev_id, data))
 }
-pub fn create_data_buf(data: u16, dev_id: u8) -> [u8; 3] {
-    let mut buf = [0_u8; 3];
+pub fn create_data_buf(data: CanData, dev_id: DevId) -> [u8; DLC] {
+    let mut buf = [0_u8; DLC];
     byteorder::LittleEndian::write_u16(&mut buf, data);
     buf[2] = dev_id;
     buf
