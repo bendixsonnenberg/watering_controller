@@ -4,6 +4,7 @@
 
 #![no_std]
 #![no_main]
+mod sd_card;
 
 use core::cell::RefCell;
 use core::panic;
@@ -28,10 +29,8 @@ use embassy_rp::{bind_interrupts, spi};
 use embassy_sync::blocking_mutex::NoopMutex;
 use embassy_sync::blocking_mutex::raw::{NoopRawMutex, ThreadModeRawMutex};
 use embassy_sync::channel::TrySendError;
-use embassy_time::{Delay, Duration, Instant, Ticker, Timer, WithTimeout};
+use embassy_time::{Delay, Duration, Timer, WithTimeout};
 use embedded_can::Frame;
-use embedded_hal_bus::spi::ExclusiveDevice;
-use embedded_sdmmc::{SdCard, VolumeIdx, VolumeManager};
 use heapless::String;
 use lcd_lcm1602_i2c::sync_lcd::Lcd;
 use log::*;
@@ -40,6 +39,9 @@ use mcp2515::*;
 use menu::{MenuRunner, Sensor};
 use static_cell::StaticCell;
 use {defmt_rtt as _, panic_probe as _};
+
+// self imports
+use crate::sd_card::sd_card_log;
 // considred changed
 const CONTROLLER_DEV_ID: DevId = 0;
 const TX_BACKOFF_TIME: u64 = 5; // time to wait if no tx buffer is available in ms
@@ -472,130 +474,6 @@ async fn menu_handle(
                 runner.input(menu::Input::Right).await;
             }
         }
-    }
-}
-
-#[allow(dead_code)]
-struct DummyTimesource();
-
-impl embedded_sdmmc::TimeSource for DummyTimesource {
-    fn get_timestamp(&self) -> embedded_sdmmc::Timestamp {
-        embedded_sdmmc::Timestamp {
-            year_since_1970: 0,
-            zero_indexed_month: 0,
-            zero_indexed_day: 0,
-            hours: 0,
-            minutes: 0,
-            seconds: 0,
-        }
-    }
-}
-
-#[embassy_executor::task]
-async fn sd_card_log(
-    mut can_tx: CanSender,
-    mut can_rx: CanReceiver,
-    sensors: &'static SensorBitmap,
-    mut sd_card_resources: SpiSdcard,
-) {
-    // this overarching loop enables the sd card to be inserted later
-    loop {
-        let mut config = spi::Config::default();
-        config.frequency = 400_000; // for initilization the frequency has to be below 400khz
-        let spi = Spi::new_blocking(
-            sd_card_resources.spi.reborrow(),
-            sd_card_resources.clk.reborrow(),
-            sd_card_resources.mosi.reborrow(),
-            sd_card_resources.miso.reborrow(),
-            config,
-        );
-        let cs = Output::new(sd_card_resources.cs.reborrow(), Level::High);
-        let spi_dev = ExclusiveDevice::new_no_delay(spi, cs);
-
-        let sdcard = SdCard::new(spi_dev, embassy_time::Delay);
-        sdcard.mark_card_uninit();
-
-        let mut volume_mgr = VolumeManager::new(sdcard, DummyTimesource());
-
-        let Ok(mut vol0) = volume_mgr.open_volume(VolumeIdx(0)) else {
-            error!("Failed opening volume, not logging anymore, retrying");
-            continue;
-        };
-        info!("got volume");
-
-        let Ok(mut root_dir) = vol0.open_root_dir() else {
-            error!("Failed opening dir");
-            continue;
-        };
-        info!("got dir");
-
-        let Ok(mut log_file) = root_dir.open_file_in_dir(
-            "log_file.csv",
-            embedded_sdmmc::Mode::ReadWriteCreateOrAppend,
-        ) else {
-            error!("failed opening file");
-            continue;
-        };
-
-        let mut ticker = Ticker::every(Duration::from_secs_floor(30));
-        loop {
-            let time = Instant::now().as_secs();
-            // we need to drop can after using it
-            let mut buf: String<32> = String::new();
-
-            let Ok(_) = core::write!(&mut buf, "Time: {}", time) else {
-                error!("failed writing time");
-                break;
-            };
-            let mut failed = false;
-            {
-                let sensors_map = sensors.lock(|sensor| sensor.borrow().clone());
-                let mut buffer: String<64> = String::new();
-                for sensor in sensors_map.into_iter() {
-                    let id = sensor as u8;
-                    let Some(moisture) =
-                        get_value(&mut can_tx, &mut can_rx, Commands::Moisture, id, sensors).await
-                    else {
-                        continue;
-                    };
-                    let Some(threshold) =
-                        get_value(&mut can_tx, &mut can_rx, Commands::Threshold, id, sensors).await
-                    else {
-                        continue;
-                    };
-                    let Ok(_) = core::write!(
-                        &mut buffer,
-                        "Sen: {}, Thr: {}, Mo: {}",
-                        id,
-                        moisture,
-                        threshold
-                    ) else {
-                        failed = true;
-                        break;
-                    };
-                    let Ok(_) = log_file.write(buffer.as_bytes()) else {
-                        failed = true;
-                        break;
-                    };
-                }
-                if failed {
-                    error!("failed writing to sd card");
-
-                    break;
-                }
-                let Ok(_) = log_file.write("\n".as_bytes()) else {
-                    error!("failed newline");
-                    break;
-                };
-                let Ok(_) = log_file.flush() else {
-                    error!("failed flushing");
-                    break;
-                };
-            }
-            ticker.next().await;
-        }
-        error!("failed at logging");
-        Timer::after_secs(60).await;
     }
 }
 
