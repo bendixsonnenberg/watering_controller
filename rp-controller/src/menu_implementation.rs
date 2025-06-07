@@ -1,0 +1,260 @@
+use embassy_futures::select;
+use embassy_rp::gpio::{Input, Pull};
+use embassy_rp::peripherals::I2C1;
+use embassy_rp::pio::Pio;
+use embassy_time::Timer;
+use menu::{MenuRunner, Sensor};
+
+use heapless::String;
+use lcd_lcm1602_i2c::sync_lcd::Lcd;
+
+use crate::{
+    CanReceiver, CanSender, DisplayI2C, Irqs, MenuInput, SensorBitmap, get_value, set_value,
+};
+use can_contract::Commands;
+use core::fmt::Write;
+use embassy_rp::i2c;
+use embassy_rp::pio_programs::rotary_encoder::{Direction, PioEncoder, PioEncoderProgram};
+use log::*;
+
+#[derive(Clone, Copy)]
+
+struct SensorBuilder {
+    sensors: &'static SensorBitmap,
+    can_tx: CanSender,
+    can_rx: CanReceiver,
+}
+impl SensorBuilder {
+    fn lean_sensor_from_id(self, id: Option<usize>) -> Option<MenuSensor> {
+        if let Some(id) = id {
+            if self.sensors.lock(|map| map.borrow().get(id as usize)) {
+                return Some(MenuSensor {
+                    builder: self,
+                    id: id as u8,
+                    threshold: None,
+                    moisture: None,
+                });
+            }
+        }
+        // id = 0 shows that no sensor was found
+        None
+    }
+    // try to get the threshold for this sensor, if it failes return none
+    async fn populate(mut self, mut sensor: MenuSensor) -> Option<MenuSensor> {
+        info!(
+            "populating with: id: {}, threshold: {:?}",
+            sensor.id, sensor.threshold
+        );
+        if let Some(threshold) = get_value(
+            &mut self.can_tx,
+            &mut self.can_rx,
+            Commands::Threshold,
+            sensor.id,
+            &self.sensors,
+        )
+        .await
+        {
+            sensor.threshold = Some(threshold);
+        } else {
+            error!("failed at getting threshold value");
+            return None;
+        }
+        if let Some(moisture) = get_value(
+            &mut self.can_tx,
+            &mut self.can_rx,
+            Commands::Moisture,
+            sensor.id,
+            &self.sensors,
+        )
+        .await
+        {
+            sensor.moisture = Some(moisture);
+        } else {
+            error!("failed at getting moisture");
+            return None;
+        }
+        Some(sensor)
+    }
+}
+#[derive(Clone)]
+struct MenuSensor {
+    #[allow(dead_code)]
+    builder: SensorBuilder,
+    id: u8,
+    threshold: Option<u16>,
+    moisture: Option<u16>,
+}
+impl Sensor<SensorBuilder> for MenuSensor {
+    fn first(builder: SensorBuilder) -> Option<Self> {
+        let id = builder.sensors.lock(|cell| cell.borrow().first_index());
+        builder.lean_sensor_from_id(id)
+    }
+    fn next(self, builder: SensorBuilder) -> Option<Self> {
+        let id = builder
+            .sensors
+            .lock(|cell| cell.borrow().next_index(self.id as usize));
+        match id {
+            Some(id) => builder.lean_sensor_from_id(Some(id)),
+            None => Sensor::first(builder),
+        }
+    }
+    async fn populate(self, builder: SensorBuilder) -> Option<Self> {
+        builder.populate(self).await
+    }
+    fn prev(self, builder: SensorBuilder) -> Option<Self> {
+        let id = builder.sensors.lock(|cell| {
+            let mut id = cell.borrow().prev_index(self.id as usize);
+            if id.is_none() {
+                id = cell.borrow().last_index();
+            }
+            id
+        });
+        builder.lean_sensor_from_id(id)
+    }
+    fn get_setting(&self) -> u16 {
+        self.threshold.unwrap_or(0)
+    }
+    fn get_id(&self) -> u8 {
+        self.id
+    }
+    fn get_status(&self) -> u16 {
+        self.moisture.unwrap_or(0)
+    }
+    fn increase_setting(mut self, mut _builder: SensorBuilder) -> Option<Self> {
+        info!("increase");
+        if let Some(threshold) = self.threshold {
+            self.threshold = Some(threshold.saturating_add(1));
+        } else {
+            self.threshold = None
+        }
+        self.send_over_can();
+        Some(self)
+    }
+    fn decrease_setting(mut self, mut _builder: SensorBuilder) -> Option<Self> {
+        info!("decrease");
+        if let Some(threshold) = self.threshold {
+            self.threshold = Some(threshold.saturating_sub(1));
+        } else {
+            self.threshold = None
+        }
+        self.send_over_can();
+        Some(self)
+    }
+}
+
+impl MenuSensor {
+    fn send_over_can(&mut self) {
+        if let Some(threshold) = self.threshold {
+            let mut tx = self.builder.can_tx;
+            set_value(&mut tx, Commands::Threshold, threshold, self.id)
+        }
+    }
+}
+fn write_two_lines(
+    lcd: &mut Lcd<'_, i2c::I2c<'_, I2C1, i2c::Blocking>, embassy_time::Delay>,
+    text: &str,
+) {
+    let _ = lcd.clear();
+    let _ = lcd.set_cursor(0, 0);
+    let (first, second) = match text.split_once(|c| c == '\n') {
+        Some((first, second)) => (first, second),
+        None => (text, ""),
+    };
+    match lcd.write_str(first) {
+        Ok(_) => {}
+        Err(e) => {
+            info!("{:?}", e);
+        }
+    }
+    let _ = lcd.set_cursor(1, 0);
+    match lcd.write_str(second) {
+        Ok(_) => {}
+        Err(e) => {
+            info!("{:?}", e);
+        }
+    }
+}
+#[embassy_executor::task]
+pub async fn menu_handle(
+    can_tx: CanSender,
+    can_rx: CanReceiver,
+    sensors: &'static SensorBitmap,
+    display_resources: DisplayI2C,
+    menu_resources: MenuInput,
+) {
+    const ADDR: u8 = 0x27;
+    let mut runner: MenuRunner<_, SensorBuilder> =
+        MenuRunner::<MenuSensor, SensorBuilder>::new(SensorBuilder {
+            sensors,
+            can_tx,
+            can_rx,
+        });
+    let mut i2c = i2c::I2c::new_blocking(
+        display_resources.i2c,
+        display_resources.sdc,
+        display_resources.sda,
+        i2c::Config::default(),
+    );
+    info!("created i2c");
+    let mut delay = embassy_time::Delay;
+    let mut lcd = match lcd_lcm1602_i2c::sync_lcd::Lcd::new(&mut i2c, &mut delay)
+        .with_address(ADDR)
+        .with_rows(2)
+        .with_cursor_on(false)
+        .init()
+    {
+        Ok(lcd) => lcd,
+        Err(e) => {
+            error!("failed at init of i2c: {:?}", e);
+            Timer::after_millis(50).await;
+            return;
+        }
+    };
+    let mut back_button = Input::new(menu_resources.back, Pull::Up);
+    let mut enter_button = Input::new(menu_resources.enter, Pull::Down);
+
+    let Pio {
+        mut common, sm0, ..
+    } = Pio::new(menu_resources.pio, Irqs);
+    let prg = PioEncoderProgram::new(&mut common);
+    let mut encoder = PioEncoder::new(
+        &mut common,
+        sm0,
+        menu_resources.encoder_clock,
+        menu_resources.encoder_dt,
+        &prg,
+    );
+
+    loop {
+        runner.update().await;
+        let mut buffer: String<33> = String::new();
+        let Ok(_) = core::writeln!(&mut buffer, "{}", runner) else {
+            break;
+        };
+        write_two_lines(&mut lcd, buffer.as_str());
+        match embassy_futures::select::select3(
+            back_button.wait_for_falling_edge(),
+            enter_button.wait_for_falling_edge(),
+            encoder.read(),
+        )
+        .await
+        {
+            select::Either3::First(_) => {
+                info!("back");
+                runner.input(menu::Input::Back).await;
+            }
+            select::Either3::Second(_) => {
+                info!("enter");
+                runner.input(menu::Input::Enter).await;
+            }
+            select::Either3::Third(Direction::Clockwise) => {
+                info!("left");
+                runner.input(menu::Input::Left).await;
+            }
+            select::Either3::Third(Direction::CounterClockwise) => {
+                info!("right");
+                runner.input(menu::Input::Right).await;
+            }
+        }
+    }
+}
