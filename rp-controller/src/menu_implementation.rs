@@ -8,9 +8,8 @@ use menu::{MenuRunner, Sensor};
 use heapless::String;
 use lcd_lcm1602_i2c::sync_lcd::Lcd;
 
-use crate::{
-    CanReceiver, CanSender, DisplayI2C, Irqs, MenuInput, SensorBitmap, get_value, set_value,
-};
+use crate::can::{CanReceiver, CanSender, get_value, set_value};
+use crate::{DisplayI2C, Irqs, MenuInput, SensorBitmap};
 use can_contract::Commands;
 use core::fmt::Write;
 use embassy_rp::i2c;

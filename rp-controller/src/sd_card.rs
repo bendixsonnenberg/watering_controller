@@ -1,4 +1,5 @@
-use crate::{CanReceiver, CanSender, SensorBitmap, SpiSdcard, get_value};
+use crate::can::{CanReceiver, get_value};
+use crate::{CanSender, SensorBitmap, SpiSdcard};
 use can_contract::Commands;
 use core::fmt::Write;
 use embassy_rp::gpio::{Level, Output};
