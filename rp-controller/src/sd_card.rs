@@ -78,8 +78,12 @@ pub async fn sd_card_log(
             // we need to drop can after using it
             let mut buf: String<32> = String::new();
 
-            let Ok(_) = core::write!(&mut buf, "Time: {}", time) else {
+            let Ok(_) = core::write!(&mut buf, "Time: {}, ", time) else {
                 error!("failed writing time");
+                break;
+            };
+            let Ok(_) = log_file.write(buf.as_bytes()) else {
+                error!("failed at writing");
                 break;
             };
             let mut failed = false;
@@ -102,8 +106,8 @@ pub async fn sd_card_log(
                         &mut buffer,
                         "Sen: {}, Thr: {}, Mo: {}",
                         id,
+                        threshold,
                         moisture,
-                        threshold
                     ) else {
                         failed = true;
                         break;
