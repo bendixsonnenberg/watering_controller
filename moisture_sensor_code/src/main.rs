@@ -90,7 +90,7 @@ async fn main(_spawner: Spawner) {
         let mut dev_id: u8 = 0;
         let pull = gpio::Pull::Up;
         // this is ugly, should fix later
-        let pins: [AnyPin; 7] = [
+        let pins: [AnyPin; 8] = [
             r.b0.into(),
             r.b1.into(),
             r.b2.into(),
@@ -98,16 +98,16 @@ async fn main(_spawner: Spawner) {
             r.b4.into(),
             r.b5.into(),
             r.b6.into(),
-            // r.b7.into(),
+            r.b7.into(),
         ];
         for pin in pins {
+            info!("dev_id:{}", dev_id);
+            dev_id *= 2;
             let input = Input::new(pin, pull);
             if input.is_low() {
                 info!("is high");
                 dev_id += 1;
             }
-            info!("dev_id:{}", dev_id);
-            dev_id *= 2;
         }
         if dev_id == 0 {
             error!("dev_id is incorrect");
