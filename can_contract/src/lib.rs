@@ -9,7 +9,6 @@ use strum::FromRepr;
 #[repr(u8)]
 pub enum Commands {
     Threshold = 0,
-    Hysterese = 1,
     // can't set moisture
     Moisture = 2,
     // the time the controller waters the plants in seconds

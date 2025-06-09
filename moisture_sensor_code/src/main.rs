@@ -52,14 +52,12 @@ assign_resources! {
 #[derive(Default)]
 struct SharedData {
     threshold: AtomicU16,
-    hysterese: AtomicU16,
     moisture: AtomicU16,
     watering_time: AtomicU16,
     backoff_time: AtomicU16,
 }
 static SHARED: SharedData = SharedData {
     threshold: AtomicU16::new(0),
-    hysterese: AtomicU16::new(0),
     moisture: AtomicU16::new(0),
     watering_time: AtomicU16::new(30),
     backoff_time: AtomicU16::new(15),
@@ -208,27 +206,6 @@ async fn handle_modify_threshold(can_resources: CanResources) {
                         if len >= 2 {
                             let new_threshold = data.expect("not rtr, should exists");
                             SHARED.threshold.store(new_threshold, Ordering::Relaxed);
-                        }
-                    }
-                }
-                Commands::Hysterese => {
-                    info!("Hysterese: {:?}", data);
-                    // hysterses
-                    if frame.header().rtr() {
-                        // send data
-                        send_data_over_can(
-                            &mut can,
-                            SHARED.hysterese.load(Ordering::Relaxed),
-                            command,
-                            CONTROLLER_ID,
-                            dev_id,
-                        )
-                        .await;
-                    } else {
-                        let len = frame.header().len();
-                        if len >= 2 {
-                            let new_threshold = data.expect("not rtr, should exists");
-                            SHARED.hysterese.store(new_threshold, Ordering::Relaxed);
                         }
                     }
                 }
