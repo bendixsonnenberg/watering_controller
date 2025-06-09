@@ -98,7 +98,7 @@ impl<T: Sensor<B> + Clone, B> Display for MenuRunner<T, B> {
             State::SensorSelection(Some(sensor)) => {
                 write!(
                     f,
-                    "Sen:{}Thr:{}\nMo:{}",
+                    "Topf:{}Feu:{}\nMess:{}",
                     sensor.get_id(),
                     sensor.get_setting(),
                     sensor.get_status()
@@ -107,7 +107,7 @@ impl<T: Sensor<B> + Clone, B> Display for MenuRunner<T, B> {
             State::SensorSelection(None) | State::SensorSettings(None) => {
                 write!(f, "missing\ngo back")
             }
-            State::SensorSettings(Some(sensor)) => write!(f, "Spt:{}", sensor.get_setting()),
+            State::SensorSettings(Some(sensor)) => write!(f, "Feuchte:{}", sensor.get_setting()),
         }
     }
 }
