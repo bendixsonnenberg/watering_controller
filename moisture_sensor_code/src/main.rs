@@ -130,6 +130,7 @@ async fn main(_spawner: Spawner) {
 #[embassy_executor::task]
 async fn handle_valve(resources: ValveResources) {
     let mut adc = adc::Adc::new(resources.adc);
+    info!("starting handle valve");
     let mut moisture_level_pin = resources.moisture_pin;
     let mut valve_pin = Output::new(resources.valve_pin, Level::Low, Speed::Low);
     // let mut vrefint = adc.enable_vref();
@@ -137,18 +138,17 @@ async fn handle_valve(resources: ValveResources) {
         // adc needs a hack in embassy to work. See embassy issue #2162
         interrupt::ADC1_2.enable();
     }
+    info!("hack done");
 
     // let vref_sample = adc.read(&mut vrefint).await;
     // info!("vref_sample: {}", vref_sample);
 
-    let value_dry = 2400;
-    let value_wet = 2200;
-    let threshold = (value_dry - value_wet) / 2 + value_wet;
+    let threshold = 4000;
     SHARED.threshold.store(threshold, Ordering::Relaxed);
     let hystere = 20;
     loop {
         let v = adc.read(&mut moisture_level_pin).await;
-        trace!("Sample: {}", v);
+        // info!("Sample: {}", v);
         SHARED.moisture.store(v, Ordering::Relaxed);
 
         let threshold = SHARED.threshold.load(Ordering::Relaxed);
@@ -314,10 +314,13 @@ async fn send_data_over_can(
 }
 
 async fn init_can(resourses: CanResources) -> Can<'static> {
+    info!("starting can init");
     let dev_id = DEV_ID.load(Ordering::Relaxed);
+    info!("dev_id_for can{}", dev_id);
     // first we define the filter, which will accept all messages directed at this device
     let mask = MASK;
     let id = get_filter_from_id(dev_id); // id is 8 bit, this will later be determined by dip switches
+
     let mask: Mask16 = Mask16::frames_with_std_id(id, mask);
 
     let mut can = Can::new(resourses.can, resourses.can_rx, resourses.can_tx, Irqs);
@@ -331,9 +334,10 @@ async fn init_can(resourses: CanResources) -> Can<'static> {
         .set_bitrate(CAN_BITRATE)
         .set_loopback(false)
         .set_silent(false);
+    info!("enabeling can");
     can.enable().await;
     info!("sending announcement");
-    Timer::after_millis(dev_id as u64 * 10).await;
+    Timer::after_millis(dev_id as u64 * 100).await;
     send_data_over_can(&mut can, 0, Commands::Announce, CONTROLLER_ID, dev_id).await;
     can
 }

@@ -136,6 +136,7 @@ pub async fn can_task(
                 let Some(frame) = frame_to_command_data(frame) else {
                     continue;
                 };
+                info!("{:?}", frame);
                 match frame {
                     (Commands::Announce, Some(dev_id), _) => sensors.lock(|sensors| {
                         // info!("got announcment fomr {}", dev_id);

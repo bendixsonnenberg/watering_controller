@@ -47,7 +47,7 @@ struct DefaultSettings {
     backoff_time: AtomicU16,
 }
 static SHARED_SETTINGS: DefaultSettings = DefaultSettings {
-    threshold: AtomicU16::new(1800),
+    threshold: AtomicU16::new(2000),
     watering_time: AtomicU16::new(15),
     backoff_time: AtomicU16::new(20),
 };
