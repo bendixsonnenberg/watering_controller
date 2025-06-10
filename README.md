@@ -1,6 +1,8 @@
 # Watering Controller
 A tinkering project to automate watering plants in a greenhouse and analyzing data afterwards.
+
 Current Progress can be seen in "Status" at the bottom.
+
 Codewise: an exploration of using embedded rust, specificaly [embassy](https://embassy.dev/).
 
 ## Short Overview
