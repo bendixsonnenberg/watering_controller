@@ -18,5 +18,5 @@ Central Controller:
 ## System Design
 The central controller communicates with each moisture sensor over CAN-Bus.
 The Specs for this Communication can be found [here](/can_protocol.md). The implementation is found [here](/can_protocol).
-The moisture sensors get a threshold and use their valves to hold that threshold, currently through a simple comparision(potential PID).
+The moisture sensors get a threshold and use their valves to hold that threshold, currently through a simple comparision (potential PID).
 
