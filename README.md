@@ -28,11 +28,12 @@ The central controller communicates with each moisture sensor over CAN-Bus.
 The Specs for this Communication can be found [here](/can_protocol.md). The implementation is found [here](/can_protocol).
 The moisture sensors get a threshold and use their valves to hold that threshold, currently through a simple comparision (potential PID).
 
+## Current Status
+Two pot-sensors together with central controller, currently set up in greenhouse, with CAN-Network and watering function working as far as assessable.
+
 ## Story and some Context
 editing pending...
 ## Milestones
-editing pending...
-## Status
-editing pending...
+June '25: working menu with individual IDs and live data
 ## Status History
 editing pending...
