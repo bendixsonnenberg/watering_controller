@@ -34,6 +34,6 @@ Two pot-sensors together with central controller, currently set up in greenhouse
 ## Story and some Context
 editing pending...
 ## Milestones
-June '25: working menu with individual IDs and live data
+June '25: working menu on LCD-Display with individual IDs and live data, navigation possible through rotary encoder "return"-button
 ## Status History
 editing pending...
