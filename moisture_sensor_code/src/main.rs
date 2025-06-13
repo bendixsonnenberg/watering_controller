@@ -18,14 +18,17 @@ use embassy_stm32::{
     timer::simple_pwm::{PwmPin, SimplePwm},
 };
 use embassy_stm32::{rcc::Sysclk, time::Hertz, *};
-use embassy_time::Timer;
+use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, signal::Signal};
+use embassy_time::{Duration, Instant, Timer, WithTimeout};
 use gpio::{Level, Output, Speed};
+use rand::{rngs::SmallRng, Rng, SeedableRng};
 
 use {defmt_rtt as _, panic_probe as _};
 // define constants
 const CAN_BITRATE: u32 = 125_000; // bitrate for can bus. We are not transfering large amounts of
                                   // data ,so lets keep this low
 const CONTROLLER_ID: u8 = 0;
+static LED_SIGNAL: Signal<CriticalSectionRawMutex, LedState> = Signal::new();
 
 assign_resources! {
     valve_control: ValveResources {
@@ -126,11 +129,73 @@ async fn main(_spawner: Spawner) {
     // setup relay
     _spawner.spawn(handle_valve(r.valve_control)).unwrap();
     _spawner
-        .spawn(handle_modify_threshold(r.can_control, r.led_pins))
+        .spawn(handle_modify_threshold(r.can_control))
         .unwrap();
-
+    _spawner.spawn(led_control(r.led_pins)).unwrap();
     //
     // create spi device
+}
+enum LedState {
+    Color(u16, u16, u16),
+    Random,
+    Off,
+}
+#[embassy_executor::task]
+async fn led_control(led: LedResources) {
+    let led_pins = led;
+    let red_pwm_pin = PwmPin::new_ch4(led_pins.red, gpio::OutputType::PushPull);
+    let green_pwm_pin = PwmPin::new_ch3(led_pins.green, gpio::OutputType::PushPull);
+    let blue_pwm_pin = PwmPin::new_ch2(led_pins.blue, gpio::OutputType::PushPull);
+    let pwm = SimplePwm::new(
+        led_pins.timer,
+        None,
+        Some(blue_pwm_pin),
+        Some(green_pwm_pin),
+        Some(red_pwm_pin),
+        Hertz(50_000),
+        timer::low_level::CountingMode::EdgeAlignedUp,
+    );
+    let channels = pwm.split();
+    let mut blue_channel = channels.ch2;
+    let mut green_channel = channels.ch3;
+    let mut red_channel = channels.ch4;
+    red_channel.set_duty_cycle_fully_off();
+    green_channel.set_duty_cycle_fully_off();
+    blue_channel.set_duty_cycle_fully_off();
+    red_channel.enable();
+    green_channel.enable();
+    blue_channel.enable();
+    let mut current_state = LedState::Off;
+    const MAX: u16 = 0b11111;
+    loop {
+        use LedState::*;
+        // the timeout makes it possible for the random setting to change color regularly
+        if let Ok(new_current_state) = LED_SIGNAL
+            .wait()
+            .with_timeout(Duration::from_millis(250))
+            .await
+        {
+            current_state = new_current_state;
+        };
+        match current_state {
+            Off => {
+                red_channel.set_duty_cycle_fully_off();
+                green_channel.set_duty_cycle_fully_off();
+                blue_channel.set_duty_cycle_fully_off();
+            }
+            Color(red, green, blue) => {
+                red_channel.set_duty_cycle_fraction(red, MAX);
+                green_channel.set_duty_cycle_fraction(green, MAX);
+                blue_channel.set_duty_cycle_fraction(blue, MAX);
+            }
+            Random => {
+                let mut rng = SmallRng::seed_from_u64(Instant::now().as_ticks());
+                red_channel.set_duty_cycle_fraction(rng.random(), MAX);
+                green_channel.set_duty_cycle_fraction(rng.random(), MAX);
+                blue_channel.set_duty_cycle_fraction(rng.random(), MAX);
+            }
+        }
+    }
 }
 
 #[embassy_executor::task]
@@ -173,27 +238,7 @@ async fn handle_valve(resources: ValveResources) {
 }
 
 #[embassy_executor::task]
-async fn handle_modify_threshold(can_resources: CanResources, led_pins: LedResources) {
-    let red_pwm_pin = PwmPin::new_ch4(led_pins.red, gpio::OutputType::PushPull);
-    let green_pwm_pin = PwmPin::new_ch3(led_pins.green, gpio::OutputType::PushPull);
-    let blue_pwm_pin = PwmPin::new_ch2(led_pins.blue, gpio::OutputType::PushPull);
-    let pwm = SimplePwm::new(
-        led_pins.timer,
-        None,
-        Some(blue_pwm_pin),
-        Some(green_pwm_pin),
-        Some(red_pwm_pin),
-        Hertz(50_000),
-        timer::low_level::CountingMode::EdgeAlignedUp,
-    );
-    let channels = pwm.split();
-    let mut blue_channel = channels.ch2;
-    let mut green_channel = channels.ch3;
-    let mut red_channel = channels.ch4;
-    red_channel.enable();
-    green_channel.enable();
-    blue_channel.enable();
-
+async fn handle_modify_threshold(can_resources: CanResources) {
     let mut can = init_can(can_resources).await;
     trace!("can initiated");
 
@@ -269,9 +314,7 @@ async fn handle_modify_threshold(can_resources: CanResources, led_pins: LedResou
                     }
                     Commands::Light => {
                         info!("got remote light; stopping light show");
-                        red_channel.set_duty_cycle_fully_off();
-                        green_channel.set_duty_cycle_fully_off();
-                        blue_channel.set_duty_cycle_fully_off();
+                        LED_SIGNAL.signal(LedState::Off);
                     }
                 },
                 CommandData::Threshold(data) => {
@@ -303,13 +346,10 @@ async fn handle_modify_threshold(can_resources: CanResources, led_pins: LedResou
                 CommandData::Light(red, green, blue) => {
                     // the max each color can be is 0b11111
                     // this is due to the fact that we only transmit u16 data
-                    const MAX: u16 = 0b11111;
-                    red_channel.set_duty_cycle_fraction(red, MAX);
-                    green_channel.set_duty_cycle_fraction(green, MAX);
-                    blue_channel.set_duty_cycle_fraction(blue, MAX);
+                    LED_SIGNAL.signal(LedState::Color(red, green, blue));
                 }
                 CommandData::LightRandom => {
-                    info!("random lights are not yet implemented")
+                    LED_SIGNAL.signal(LedState::Random);
                 }
             }
         }
