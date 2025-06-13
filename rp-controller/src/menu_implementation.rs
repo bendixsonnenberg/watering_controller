@@ -10,7 +10,7 @@ use lcd_lcm1602_i2c::sync_lcd::Lcd;
 
 use crate::can::{CanReceiver, CanSender, get_value, set_value};
 use crate::{DisplayI2C, Irqs, MenuInput, SensorBitmap};
-use can_contract::Commands;
+use can_contract::{CommandData, Commands};
 use core::fmt::Write;
 use embassy_rp::i2c;
 use embassy_rp::pio_programs::rotary_encoder::{Direction, PioEncoder, PioEncoderProgram};
@@ -45,7 +45,7 @@ impl SensorBuilder {
             "populating with: id: {}, threshold: {:?}",
             sensor.id, sensor.threshold
         );
-        if let Some(threshold) = get_value(
+        if let Some(CommandData::Threshold(threshold)) = get_value(
             &mut self.can_tx,
             &mut self.can_rx,
             Commands::Threshold,
@@ -59,7 +59,7 @@ impl SensorBuilder {
             error!("failed at getting threshold value");
             return None;
         }
-        if let Some(moisture) = get_value(
+        if let Some(CommandData::Moisture(moisture)) = get_value(
             &mut self.can_tx,
             &mut self.can_rx,
             Commands::Moisture,
@@ -146,7 +146,12 @@ impl MenuSensor {
     fn send_over_can(&mut self) {
         if let Some(threshold) = self.threshold {
             let mut tx = self.builder.can_tx;
-            set_value(&mut tx, Commands::Threshold, threshold, self.id)
+            set_value(
+                &mut tx,
+                Commands::Threshold,
+                can_contract::CommandData::Threshold(threshold),
+                self.id,
+            )
         }
     }
 }

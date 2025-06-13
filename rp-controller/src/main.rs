@@ -13,7 +13,6 @@ use core::sync::atomic::AtomicU16;
 use assign_resources::*;
 use bitmaps::Bitmap;
 use can::CanChannel;
-use can::CanPayload;
 use can::CanSender;
 use can::can_task;
 use can::init_can;
@@ -215,7 +214,7 @@ async fn poll_sensors(can_tx: CanSender) {
         // ask every id if it exists
         info!("polling: {}", i);
         can_tx
-            .send((Commands::Announce, i, CanPayload::Remote))
+            .send((Commands::Announce, i, can_contract::CommandData::Remote))
             .await;
     }
 }

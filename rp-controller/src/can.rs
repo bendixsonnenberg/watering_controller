@@ -1,7 +1,7 @@
 use crate::SHARED_SETTINGS;
 use crate::SensorBitmap;
 use crate::SpiCan;
-use can_contract::{Commands, DevId, frame_to_command_data, get_filter_from_id};
+use can_contract::{CommandData, Commands, DevId, frame_to_command_data, get_filter_from_id};
 use core::cell::RefCell;
 use core::panic;
 use embassy_futures::select;
@@ -31,12 +31,7 @@ type CanBus = MCP2515<
         Output<'static>,
     >,
 >;
-type CanChannelData = (Commands, can_contract::DevId, CanPayload);
-#[derive(Debug)]
-pub enum CanPayload {
-    Remote,
-    Data(can_contract::CanData),
-}
+type CanChannelData = (Commands, can_contract::DevId, CommandData);
 pub type CanChannel =
     embassy_sync::channel::Channel<ThreadModeRawMutex, CanChannelData, CHANNEL_SIZE>;
 pub type CanSender =
@@ -47,11 +42,11 @@ pub type CanReceiver =
 fn send_settings_to_sensor(
     dev_id: can_contract::DevId,
     channel: CanSender,
-) -> Result<(), TrySendError<(Commands, can_contract::DevId, CanPayload)>> {
+) -> Result<(), TrySendError<(Commands, can_contract::DevId, CommandData)>> {
     channel.try_send((
         Commands::Threshold,
         dev_id,
-        CanPayload::Data(
+        CommandData::Threshold(
             SHARED_SETTINGS
                 .threshold
                 .load(core::sync::atomic::Ordering::Relaxed),
@@ -60,7 +55,7 @@ fn send_settings_to_sensor(
     channel.try_send((
         Commands::WateringTime,
         dev_id,
-        CanPayload::Data(
+        CommandData::WateringTime(
             SHARED_SETTINGS
                 .watering_time
                 .load(core::sync::atomic::Ordering::Relaxed),
@@ -69,7 +64,7 @@ fn send_settings_to_sensor(
     channel.try_send((
         Commands::BackoffTime,
         dev_id,
-        CanPayload::Data(
+        CommandData::BackoffTime(
             SHARED_SETTINGS
                 .backoff_time
                 .load(core::sync::atomic::Ordering::Relaxed),
@@ -148,19 +143,21 @@ pub async fn can_task(
 
                         let _ = send_settings_to_sensor(dev_id, self_send);
                     }),
-                    (command, Some(dev_id), Some(data)) => {
+                    (_command, Some(_dev_id), CommandData::Remote) => {
+                        info!("received remote frame, need to handle it")
+                    }
+                    (command, Some(dev_id), data) => {
                         // use try send here to avoid blocking the task from interacting with the
                         // can
-                        let r = receive_channel.try_send((command, dev_id, CanPayload::Data(data)));
+                        //
+                        // this channel goes to the log file
+                        let r = receive_channel.try_send((command, dev_id, data));
                         match r {
                             Ok(_) => {}
                             Err(e) => {
                                 info!("{:?}", e);
                             }
                         }
-                    }
-                    (_command, Some(_dev_id), None) => {
-                        info!("received remote frame, need to handle it")
                     }
                     (_, _, _) => continue,
                 }
@@ -178,9 +175,9 @@ pub async fn can_task(
                 };
 
                 let frame = match data {
-                    CanPayload::Remote => CanFrame::new_remote(id, can_contract::DLC),
+                    CommandData::Remote => CanFrame::new_remote(id, can_contract::DLC),
 
-                    CanPayload::Data(data) => {
+                    _ => {
                         let buf = can_contract::create_data_buf(data, CONTROLLER_DEV_ID);
                         CanFrame::new(id, &buf)
                     }
@@ -204,12 +201,12 @@ pub async fn can_task(
 pub fn set_value(
     can_tx: &mut CanSender,
     command: Commands,
-    data: can_contract::CanData,
+    data: CommandData,
     dev_id: can_contract::DevId,
 ) {
-    if let Err(e) = can_tx.try_send((command, dev_id, CanPayload::Data(data))) {
+    if let Err(e) = can_tx.try_send((command, dev_id, data)) {
         error!(
-            "failed setting value for {:?}, dev_id {}, data {}, {:?}",
+            "failed setting value for {:?}, dev_id {}, data {:?}, {:?}",
             command, dev_id, data, e
         );
     };
@@ -220,10 +217,10 @@ pub async fn get_value(
     command: Commands,
     dev_id: u8,
     sensors: &SensorBitmap,
-) -> Option<can_contract::CanData> {
-    can_tx.send((command, dev_id, CanPayload::Remote)).await;
+) -> Option<can_contract::CommandData> {
+    can_tx.send((command, dev_id, CommandData::Remote)).await;
 
-    let Ok((r_command, r_source_id, CanPayload::Data(r_data))) = can_rx
+    let Ok((r_command, r_source_id, r_data)) = can_rx
         .receive()
         .with_timeout(Duration::from_millis(500))
         .await

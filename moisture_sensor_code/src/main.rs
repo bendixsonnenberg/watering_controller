@@ -187,93 +187,97 @@ async fn handle_modify_threshold(can_resources: CanResources) {
                 // device id, has to be the id of this device anyways
                 continue;
             };
-            match command {
-                Commands::Threshold => {
+            match data {
+                CommandData::Remote => match command {
+                    Commands::Threshold => {
+                        send_data_over_can(
+                            &mut can,
+                            CommandData::Threshold(SHARED.threshold.load(Ordering::Relaxed)),
+                            command,
+                            CONTROLLER_ID,
+                            dev_id,
+                        )
+                        .await;
+                    }
+                    Commands::Moisture => {
+                        send_data_over_can(
+                            &mut can,
+                            CommandData::Moisture(SHARED.moisture.load(Ordering::Relaxed)),
+                            command,
+                            CONTROLLER_ID,
+                            dev_id,
+                        )
+                        .await;
+                    }
+                    Commands::BackoffTime => {
+                        send_data_over_can(
+                            &mut can,
+                            CommandData::BackoffTime(SHARED.backoff_time.load(Ordering::Relaxed)),
+                            command,
+                            CONTROLLER_ID,
+                            dev_id,
+                        )
+                        .await;
+                    }
+                    Commands::WateringTime => {
+                        send_data_over_can(
+                            &mut can,
+                            CommandData::WateringTime(SHARED.watering_time.load(Ordering::Relaxed)),
+                            command,
+                            CONTROLLER_ID,
+                            dev_id,
+                        )
+                        .await;
+                    }
+                    Commands::Announce => {
+                        send_data_over_can(
+                            &mut can,
+                            CommandData::Announce(0),
+                            command,
+                            CONTROLLER_ID,
+                            dev_id,
+                        )
+                        .await;
+                    }
+                    Commands::Light => {
+                        info!("got remote light")
+                    }
+                },
+                CommandData::Threshold(data) => {
                     info!("Threshold: {:?}", data);
                     // THRESHOLD
-                    if frame.header().rtr() {
-                        // send data
-                        send_data_over_can(
-                            &mut can,
-                            SHARED.threshold.load(Ordering::Relaxed),
-                            command,
-                            CONTROLLER_ID,
-                            dev_id,
-                        )
-                        .await;
-                    } else {
-                        let len = frame.header().len();
-                        if len >= 2 {
-                            let new_threshold = data.expect("not rtr, should exists");
-                            SHARED.threshold.store(new_threshold, Ordering::Relaxed);
-                        }
+                    let len = frame.header().len();
+                    if len >= 2 {
+                        SHARED.threshold.store(data, Ordering::Relaxed);
                     }
                 }
-                Commands::Moisture => {
-                    info!("Moisture: {:?}", data);
-                    // moisture
-                    if frame.header().rtr() {
-                        // send data
-                        send_data_over_can(
-                            &mut can,
-                            SHARED.moisture.load(Ordering::Relaxed),
-                            command,
-                            CONTROLLER_ID,
-                            dev_id,
-                        )
-                        .await;
-                    }
+                CommandData::Moisture(_) => {
+                    error!("cant set moisture");
                 }
-                Commands::BackoffTime => {
+                CommandData::BackoffTime(data) => {
                     info!("BackoffTime: {:?}", data);
-                    if !frame.header().rtr() {
-                        SHARED
-                            .backoff_time
-                            .store(data.expect("not rtr should exists"), Ordering::Relaxed);
-                    } else {
-                        send_data_over_can(
-                            &mut can,
-                            SHARED.backoff_time.load(Ordering::Relaxed),
-                            command,
-                            CONTROLLER_ID,
-                            dev_id,
-                        )
-                        .await;
-                    }
+                    SHARED.backoff_time.store(data, Ordering::Relaxed);
                 }
-                Commands::WateringTime => {
-                    info!("WateringTime: {:?}", data);
-                    if !frame.header().rtr() {
-                        SHARED
-                            .watering_time
-                            .store(data.expect("not rtr should exists"), Ordering::Relaxed);
-                    } else {
-                        send_data_over_can(
-                            &mut can,
-                            SHARED.watering_time.load(Ordering::Relaxed),
-                            command,
-                            CONTROLLER_ID,
-                            dev_id,
-                        )
-                        .await;
-                    }
+                CommandData::WateringTime(data) => {
+                    // info!("WateringTime: {:?}", data);
+                    SHARED.watering_time.store(data, Ordering::Relaxed);
                 }
-                Commands::Announce => {
+                CommandData::Announce(_) => {
                     info!("Received announce");
                     if !frame.header().rtr() {
                         // some other sensor sent a announcement with our device id.
                         // just
-                    } else {
-                        send_data_over_can(&mut can, 0, command, CONTROLLER_ID, dev_id).await;
                     }
                 }
+                CommandData::Light(red, green, blue) => {}
+                CommandData::LightRandom => {}
             }
         }
     }
 }
 async fn send_data_over_can(
     can: &mut Can<'_>,
-    data: u16,
+    data: CommandData,
     command: Commands,
     target_id: u8,
     source_id: u8,
@@ -315,6 +319,13 @@ async fn init_can(resourses: CanResources) -> Can<'static> {
     can.enable().await;
     info!("sending announcement");
     Timer::after_millis(dev_id as u64 * 100).await;
-    send_data_over_can(&mut can, 0, Commands::Announce, CONTROLLER_ID, dev_id).await;
+    send_data_over_can(
+        &mut can,
+        CommandData::Announce(0),
+        Commands::Announce,
+        CONTROLLER_ID,
+        dev_id,
+    )
+    .await;
     can
 }
