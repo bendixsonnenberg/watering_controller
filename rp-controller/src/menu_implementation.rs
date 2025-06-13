@@ -16,6 +16,7 @@ use embassy_rp::i2c;
 use embassy_rp::pio_programs::rotary_encoder::{Direction, PioEncoder, PioEncoderProgram};
 use log::*;
 
+const MOISTURE_INCREMENT_STEP_SIZE: u16 = 10;
 #[derive(Clone, Copy)]
 
 struct SensorBuilder {
@@ -122,7 +123,7 @@ impl Sensor<SensorBuilder> for MenuSensor {
     fn increase_setting(mut self, mut _builder: SensorBuilder) -> Option<Self> {
         info!("increase");
         if let Some(threshold) = self.threshold {
-            self.threshold = Some(threshold.saturating_add(1));
+            self.threshold = Some(threshold.saturating_add(MOISTURE_INCREMENT_STEP_SIZE));
         } else {
             self.threshold = None
         }
@@ -132,7 +133,7 @@ impl Sensor<SensorBuilder> for MenuSensor {
     fn decrease_setting(mut self, mut _builder: SensorBuilder) -> Option<Self> {
         info!("decrease");
         if let Some(threshold) = self.threshold {
-            self.threshold = Some(threshold.saturating_sub(1));
+            self.threshold = Some(threshold.saturating_sub(MOISTURE_INCREMENT_STEP_SIZE));
         } else {
             self.threshold = None
         }
