@@ -15,6 +15,7 @@ use embassy_executor::Spawner;
 use embassy_stm32::{
     gpio::{AnyPin, Input},
     interrupt::InterruptExt,
+    timer::simple_pwm::{PwmPin, SimplePwm},
 };
 use embassy_stm32::{rcc::Sysclk, time::Hertz, *};
 use embassy_time::Timer;
@@ -47,6 +48,13 @@ assign_resources! {
         b6: PA5,
         b7: PA4,
 
+    }
+    // the led pins and timer have to be together, it is impossible to do something forbidden here, since rustc will not compile
+    led_pins: LedResources {
+        timer: TIM2,
+        red: PA3,
+        green: PA2,
+        blue: PA1,
     }
 }
 #[derive(Default)]
@@ -118,7 +126,7 @@ async fn main(_spawner: Spawner) {
     // setup relay
     _spawner.spawn(handle_valve(r.valve_control)).unwrap();
     _spawner
-        .spawn(handle_modify_threshold(r.can_control))
+        .spawn(handle_modify_threshold(r.can_control, r.led_pins))
         .unwrap();
 
     //
@@ -165,7 +173,27 @@ async fn handle_valve(resources: ValveResources) {
 }
 
 #[embassy_executor::task]
-async fn handle_modify_threshold(can_resources: CanResources) {
+async fn handle_modify_threshold(can_resources: CanResources, led_pins: LedResources) {
+    let red_pwm_pin = PwmPin::new_ch4(led_pins.red, gpio::OutputType::PushPull);
+    let green_pwm_pin = PwmPin::new_ch3(led_pins.green, gpio::OutputType::PushPull);
+    let blue_pwm_pin = PwmPin::new_ch2(led_pins.blue, gpio::OutputType::PushPull);
+    let pwm = SimplePwm::new(
+        led_pins.timer,
+        None,
+        Some(blue_pwm_pin),
+        Some(green_pwm_pin),
+        Some(red_pwm_pin),
+        Hertz(50_000),
+        timer::low_level::CountingMode::EdgeAlignedUp,
+    );
+    let channels = pwm.split();
+    let mut blue_channel = channels.ch2;
+    let mut green_channel = channels.ch3;
+    let mut red_channel = channels.ch4;
+    red_channel.enable();
+    green_channel.enable();
+    blue_channel.enable();
+
     let mut can = init_can(can_resources).await;
     trace!("can initiated");
 
@@ -240,7 +268,10 @@ async fn handle_modify_threshold(can_resources: CanResources) {
                         .await;
                     }
                     Commands::Light => {
-                        info!("got remote light")
+                        info!("got remote light; stopping light show");
+                        red_channel.set_duty_cycle_fully_off();
+                        green_channel.set_duty_cycle_fully_off();
+                        blue_channel.set_duty_cycle_fully_off();
                     }
                 },
                 CommandData::Threshold(data) => {
@@ -269,8 +300,17 @@ async fn handle_modify_threshold(can_resources: CanResources) {
                         // just
                     }
                 }
-                CommandData::Light(red, green, blue) => {}
-                CommandData::LightRandom => {}
+                CommandData::Light(red, green, blue) => {
+                    // the max each color can be is 0b11111
+                    // this is due to the fact that we only transmit u16 data
+                    const MAX: u16 = 0b11111;
+                    red_channel.set_duty_cycle_fraction(red, MAX);
+                    green_channel.set_duty_cycle_fraction(green, MAX);
+                    blue_channel.set_duty_cycle_fraction(blue, MAX);
+                }
+                CommandData::LightRandom => {
+                    info!("random lights are not yet implemented")
+                }
             }
         }
     }
