@@ -6,14 +6,14 @@ use embassy_time::Timer;
 use menu::{MenuRunner, Sensor};
 
 use heapless::String;
-use lcd_lcm1602_i2c::sync_lcd::Lcd;
+use lcd_lcm1602_i2c::async_lcd::Lcd;
 
 use crate::can::{CanReceiver, CanSender, get_value, set_value};
 use crate::{DisplayI2C, Irqs, MenuInput, SensorBitmap};
 use can_contract::Commands;
 use core::fmt::Write;
-use embassy_rp::i2c;
 use embassy_rp::pio_programs::rotary_encoder::{Direction, PioEncoder, PioEncoderProgram};
+use embassy_rp::{bind_interrupts, i2c};
 use log::*;
 
 const MOISTURE_INCREMENT_STEP_SIZE: u16 = 10;
@@ -150,24 +150,24 @@ impl MenuSensor {
         }
     }
 }
-fn write_two_lines(
-    lcd: &mut Lcd<'_, i2c::I2c<'_, I2C1, i2c::Blocking>, embassy_time::Delay>,
+async fn write_two_lines(
+    lcd: &mut Lcd<'_, i2c::I2c<'_, I2C1, i2c::Async>, embassy_time::Delay>,
     text: &str,
 ) {
-    let _ = lcd.clear();
-    let _ = lcd.set_cursor(0, 0);
+    let _ = lcd.clear().await;
+    let _ = lcd.set_cursor(0, 0).await;
     let (first, second) = match text.split_once(|c| c == '\n') {
         Some((first, second)) => (first, second),
         None => (text, ""),
     };
-    match lcd.write_str(first) {
+    match lcd.write_str(first).await {
         Ok(_) => {}
         Err(e) => {
             info!("{:?}", e);
         }
     }
-    let _ = lcd.set_cursor(1, 0);
-    match lcd.write_str(second) {
+    let _ = lcd.set_cursor(1, 0).await;
+    match lcd.write_str(second).await {
         Ok(_) => {}
         Err(e) => {
             info!("{:?}", e);
@@ -189,19 +189,21 @@ pub async fn menu_handle(
             can_tx,
             can_rx,
         });
-    let mut i2c = i2c::I2c::new_blocking(
+    let mut i2c = i2c::I2c::new_async(
         display_resources.i2c,
         display_resources.sdc,
         display_resources.sda,
+        Irqs,
         i2c::Config::default(),
     );
     info!("created i2c");
     let mut delay = embassy_time::Delay;
-    let mut lcd = match lcd_lcm1602_i2c::sync_lcd::Lcd::new(&mut i2c, &mut delay)
+    let mut lcd = match lcd_lcm1602_i2c::async_lcd::Lcd::new(&mut i2c, &mut delay)
         .with_address(ADDR)
         .with_rows(2)
         .with_cursor_on(false)
         .init()
+        .await
     {
         Ok(lcd) => lcd,
         Err(e) => {
@@ -231,7 +233,7 @@ pub async fn menu_handle(
         let Ok(_) = core::writeln!(&mut buffer, "{}", runner) else {
             break;
         };
-        write_two_lines(&mut lcd, buffer.as_str());
+        write_two_lines(&mut lcd, buffer.as_str()).await;
         match embassy_futures::select::select3(
             back_button.wait_for_falling_edge(),
             enter_button.wait_for_falling_edge(),
