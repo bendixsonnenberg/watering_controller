@@ -20,7 +20,7 @@ pub enum State<T> {
     SensorsSelect,
     Errors,
     SensorSelection(Option<T>),
-    SensorSettings(Option<T>),
+    SensorSettingThreshold(Option<T>),
 }
 
 pub trait Sensor<B>: Sized {
@@ -32,6 +32,7 @@ pub trait Sensor<B>: Sized {
     fn get_id(&self) -> u8;
     fn increase_setting(self, builder: B) -> Option<Self>;
     fn decrease_setting(self, builder: B) -> Option<Self>;
+    /// gets executed every time sensor specific data need to be displayed; executed by calling update on the menu runner
     #[allow(async_fn_in_trait)]
     async fn populate(self, builder: B) -> Option<Self>;
 }
@@ -53,8 +54,8 @@ impl<T: Sensor<B> + Clone, B: Clone> MenuRunner<T, B> {
             State::SensorSelection(Some(sensor)) => {
                 State::SensorSelection(sensor.populate(self.builder.clone()).await)
             }
-            State::SensorSettings(Some(sensor)) => {
-                State::SensorSettings(sensor.populate(self.builder.clone()).await)
+            State::SensorSettingThreshold(Some(sensor)) => {
+                State::SensorSettingThreshold(sensor.populate(self.builder.clone()).await)
             }
             s => s,
         };
@@ -69,7 +70,7 @@ impl<T: Sensor<B> + Clone, B: Clone> MenuRunner<T, B> {
             (SensorsSelect, Right) => Errors,
             (SensorsSelect, Enter) => SensorSelection(Sensor::first(self.builder.clone())),
             (SensorsSelect, _) => SensorsSelect,
-            (SensorSelection(sensor), Enter) => SensorSettings(sensor),
+            (SensorSelection(sensor), Enter) => SensorSettingThreshold(sensor),
             (SensorSelection(Some(sensor)), Right) => {
                 SensorSelection(sensor.next(self.builder.clone()))
             }
@@ -77,16 +78,16 @@ impl<T: Sensor<B> + Clone, B: Clone> MenuRunner<T, B> {
                 SensorSelection(sensor.prev(self.builder.clone()))
             }
             (SensorSelection(None), Left | Right) => SensorSelection(None),
-            (SensorSettings(Some(sensor)), Left) => {
-                SensorSettings(sensor.increase_setting(self.builder.clone()))
+            (SensorSettingThreshold(Some(sensor)), Left) => {
+                SensorSettingThreshold(sensor.increase_setting(self.builder.clone()))
             }
-            (SensorSettings(None), Left | Right) => SensorSettings(None),
-            (SensorSettings(Some(sensor)), Right) => {
-                SensorSettings(sensor.decrease_setting(self.builder.clone()))
+            (SensorSettingThreshold(None), Left | Right) => SensorSettingThreshold(None),
+            (SensorSettingThreshold(Some(sensor)), Right) => {
+                SensorSettingThreshold(sensor.decrease_setting(self.builder.clone()))
             }
             (SensorSelection(_), Back) => SensorsSelect,
-            (SensorSettings(sensor), Back) => SensorSelection(sensor),
-            (SensorSettings(sensor), Enter) => SensorSettings(sensor),
+            (SensorSettingThreshold(sensor), Back) => SensorSelection(sensor),
+            (SensorSettingThreshold(sensor), Enter) => SensorSettingThreshold(sensor),
         }
     }
 }
@@ -104,10 +105,12 @@ impl<T: Sensor<B> + Clone, B> Display for MenuRunner<T, B> {
                     sensor.get_status()
                 )
             }
-            State::SensorSelection(None) | State::SensorSettings(None) => {
+            State::SensorSelection(None) | State::SensorSettingThreshold(None) => {
                 write!(f, "missing\ngo back")
             }
-            State::SensorSettings(Some(sensor)) => write!(f, "Feuchte:{}", sensor.get_setting()),
+            State::SensorSettingThreshold(Some(sensor)) => {
+                write!(f, "Feuchte:{}", sensor.get_setting())
+            }
         }
     }
 }
