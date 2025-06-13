@@ -17,6 +17,7 @@ use embassy_rp::pio_programs::rotary_encoder::{Direction, PioEncoder, PioEncoder
 use log::*;
 
 const MOISTURE_INCREMENT_STEP_SIZE: u16 = 10;
+const FOCUS_COLOR: CommandData = CommandData::Light(0b11111, 0, 0);
 #[derive(Clone, Copy)]
 
 struct SensorBuilder {
@@ -75,6 +76,17 @@ impl SensorBuilder {
         }
         Some(sensor)
     }
+    fn focus(mut self, sensor: MenuSensor) {
+        set_value(&mut self.can_tx, Commands::Light, FOCUS_COLOR, sensor.id);
+    }
+    fn unfocus(mut self, sensor: MenuSensor) {
+        set_value(
+            &mut self.can_tx,
+            Commands::Light,
+            CommandData::Light(0, 0, 0),
+            sensor.id,
+        );
+    }
 }
 #[derive(Clone)]
 struct MenuSensor {
@@ -101,6 +113,13 @@ impl Sensor<SensorBuilder> for MenuSensor {
     async fn populate(self, builder: SensorBuilder) -> Option<Self> {
         builder.populate(self).await
     }
+    async fn focus(self, builder: SensorBuilder) {
+        builder.focus(self);
+    }
+    async fn unfocus(self, builder: SensorBuilder) {
+        builder.unfocus(self);
+    }
+
     fn prev(self, builder: SensorBuilder) -> Option<Self> {
         let id = builder.sensors.lock(|cell| {
             let mut id = cell.borrow().prev_index(self.id as usize);

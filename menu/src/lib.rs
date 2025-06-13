@@ -35,6 +35,10 @@ pub trait Sensor<B>: Sized {
     /// gets executed every time sensor specific data need to be displayed; executed by calling update on the menu runner
     #[allow(async_fn_in_trait)]
     async fn populate(self, builder: B) -> Option<Self>;
+    #[allow(async_fn_in_trait)]
+    async fn focus(self, builder: B);
+    #[allow(async_fn_in_trait)]
+    async fn unfocus(self, builder: B);
 }
 
 pub struct MenuRunner<T: Sensor<B> + Clone, B> {
@@ -68,14 +72,31 @@ impl<T: Sensor<B> + Clone, B: Clone> MenuRunner<T, B> {
             (Errors, Left) => SensorsSelect,
             (Errors, _) => Errors,
             (SensorsSelect, Right) => Errors,
-            (SensorsSelect, Enter) => SensorSelection(Sensor::first(self.builder.clone())),
+            (SensorsSelect, Enter) => {
+                let sensor: Option<T> = Sensor::first(self.builder.clone());
+                if let Some(s) = sensor.clone() {
+                    s.focus(self.builder.clone()).await;
+                }
+                SensorSelection(sensor)
+            }
             (SensorsSelect, _) => SensorsSelect,
             (SensorSelection(sensor), Enter) => SensorSettingThreshold(sensor),
             (SensorSelection(Some(sensor)), Right) => {
-                SensorSelection(sensor.next(self.builder.clone()))
+                let next_sensor = sensor.clone().next(self.builder.clone());
+                if let Some(s) = next_sensor.clone() {
+                    sensor.unfocus(self.builder.clone()).await;
+                    s.focus(self.builder.clone()).await;
+                }
+                SensorSelection(next_sensor)
             }
             (SensorSelection(Some(sensor)), Left) => {
-                SensorSelection(sensor.prev(self.builder.clone()))
+                let next_sensor = sensor.clone().next(self.builder.clone());
+                if let Some(s) = next_sensor.clone() {
+                    sensor.unfocus(self.builder.clone()).await;
+                    s.focus(self.builder.clone()).await;
+                }
+
+                SensorSelection(next_sensor)
             }
             (SensorSelection(None), Left | Right) => SensorSelection(None),
             (SensorSettingThreshold(Some(sensor)), Left) => {
@@ -85,7 +106,12 @@ impl<T: Sensor<B> + Clone, B: Clone> MenuRunner<T, B> {
             (SensorSettingThreshold(Some(sensor)), Right) => {
                 SensorSettingThreshold(sensor.decrease_setting(self.builder.clone()))
             }
-            (SensorSelection(_), Back) => SensorsSelect,
+            (SensorSelection(sensor), Back) => {
+                if let Some(s) = sensor {
+                    s.unfocus(self.builder.clone()).await;
+                }
+                SensorsSelect
+            }
             (SensorSettingThreshold(sensor), Back) => SensorSelection(sensor),
             (SensorSettingThreshold(sensor), Enter) => SensorSettingThreshold(sensor),
         }
