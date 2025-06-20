@@ -101,10 +101,16 @@ pub fn create_data_buf(data: CommandData, dev_id: DevId) -> [u8; DLC] {
     match data {
         Threshold(data) | Moisture(data) | WateringTime(data) | BackoffTime(data)
         | Announce(data) => byteorder::LittleEndian::write_u16(&mut buf, data),
-        Light(red, green, blue) => byteorder::LittleEndian::write_u16(
-            &mut buf,
-            red | green << LIGHT_BIT_COUNT | blue << 2 * LIGHT_BIT_COUNT,
-        ),
+        Light(red, green, blue) => {
+            if (red > LIGHT_MASK || green > LIGHT_MASK || blue > LIGHT_MASK) {
+                //TODO handle error more gracefully
+            } else {
+                byteorder::LittleEndian::write_u16(
+                    &mut buf,
+                    red | green << LIGHT_BIT_COUNT | blue << 2 * LIGHT_BIT_COUNT,
+                )
+            }
+        }
         LightRandom => byteorder::LittleEndian::write_u16(&mut buf, 0b1000_0000_0000_0000),
         Remote => {}
     }
