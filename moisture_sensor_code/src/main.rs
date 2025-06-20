@@ -17,7 +17,7 @@ use embassy_stm32::{
     interrupt::InterruptExt,
 };
 use embassy_stm32::{rcc::Sysclk, time::Hertz, *};
-use embassy_time::Timer;
+use embassy_time::{Duration, Instant, Timer};
 use gpio::{Level, Output, Speed};
 
 use {defmt_rtt as _, panic_probe as _};
@@ -144,6 +144,7 @@ async fn handle_valve(resources: ValveResources) {
     let threshold = 4000;
     SHARED.threshold.store(threshold, Ordering::Relaxed);
     let hystere = 20;
+    let mut last_watering: Option<Instant> = None;
     loop {
         let v = adc.read(&mut moisture_level_pin).await;
         // info!("Sample: {}", v);
@@ -151,14 +152,28 @@ async fn handle_valve(resources: ValveResources) {
 
         let threshold = SHARED.threshold.load(Ordering::Relaxed);
         if v > threshold - hystere {
-            // wet condition, set to fill put water, then wait for 2min before trying to water
-            // again
-            info!("watering now");
-            valve_pin.set_high();
-            Timer::after_secs(SHARED.watering_time.load(Ordering::Relaxed) as u64).await;
-            valve_pin.set_low();
-            info!("waiting for backoff");
-            Timer::after_secs(SHARED.backoff_time.load(Ordering::Relaxed) as u64 * 60).await;
+            // wet condition, set to fill put water,
+            // check if we are still in backoff time
+            let time_taken: Duration = {
+                if let Some(watering) = last_watering {
+                    if let Some(time_taken) = Instant::now().checked_duration_since(watering) {
+                        time_taken
+                    } else {
+                        Duration::MAX
+                    }
+                } else {
+                    Duration::MAX
+                }
+            };
+            if time_taken
+                > Duration::from_secs(SHARED.backoff_time.load(Ordering::Relaxed) as u64 * 60)
+            {
+                info!("watering now");
+                valve_pin.set_high();
+                Timer::after_secs(SHARED.watering_time.load(Ordering::Relaxed) as u64).await;
+                valve_pin.set_low();
+                last_watering = Some(Instant::now());
+            }
         }
         Timer::after_millis(100).await;
     }
