@@ -12,8 +12,8 @@ use crate::can::{CanReceiver, CanSender, get_value, set_value};
 use crate::{DisplayI2C, Irqs, MenuInput, SensorBitmap};
 use can_contract::Commands;
 use core::fmt::Write;
+use embassy_rp::i2c;
 use embassy_rp::pio_programs::rotary_encoder::{Direction, PioEncoder, PioEncoderProgram};
-use embassy_rp::{bind_interrupts, i2c};
 use log::*;
 
 const MOISTURE_INCREMENT_STEP_SIZE: u16 = 10;
@@ -33,6 +33,8 @@ impl SensorBuilder {
                     id: id as u8,
                     threshold: None,
                     moisture: None,
+                    backoff_time: None,
+                    watering_time: None,
                 });
             }
         }
@@ -41,38 +43,54 @@ impl SensorBuilder {
     }
     // try to get the threshold for this sensor, if it failes return none
     async fn populate(mut self, mut sensor: MenuSensor) -> Option<MenuSensor> {
-        info!(
+        trace!(
             "populating with: id: {}, threshold: {:?}",
             sensor.id, sensor.threshold
         );
-        if let Some(threshold) = get_value(
-            &mut self.can_tx,
-            &mut self.can_rx,
-            Commands::Threshold,
-            sensor.id,
-            &self.sensors,
-        )
-        .await
-        {
-            sensor.threshold = Some(threshold);
-        } else {
-            error!("failed at getting threshold value");
-            return None;
-        }
-        if let Some(moisture) = get_value(
-            &mut self.can_tx,
-            &mut self.can_rx,
-            Commands::Moisture,
-            sensor.id,
-            &self.sensors,
-        )
-        .await
-        {
-            sensor.moisture = Some(moisture);
-        } else {
-            error!("failed at getting moisture");
-            return None;
-        }
+        sensor.moisture = Some(
+            get_value(
+                &mut self.can_tx,
+                &mut self.can_rx,
+                Commands::Moisture,
+                sensor.id,
+                &self.sensors,
+            )
+            .await?,
+        );
+        trace!("got moisture");
+        sensor.threshold = Some(
+            get_value(
+                &mut self.can_tx,
+                &mut self.can_rx,
+                Commands::Threshold,
+                sensor.id,
+                &self.sensors,
+            )
+            .await?,
+        );
+        trace!("got threshold");
+        sensor.backoff_time = Some(
+            get_value(
+                &mut self.can_tx,
+                &mut self.can_rx,
+                Commands::BackoffTime,
+                sensor.id,
+                &self.sensors,
+            )
+            .await?,
+        );
+        trace!("got backoff_time");
+        sensor.watering_time = Some(
+            get_value(
+                &mut self.can_tx,
+                &mut self.can_rx,
+                Commands::WateringTime,
+                sensor.id,
+                &self.sensors,
+            )
+            .await?,
+        );
+        trace!("got watering_time");
         Some(sensor)
     }
 }
@@ -83,6 +101,8 @@ struct MenuSensor {
     id: u8,
     threshold: Option<u16>,
     moisture: Option<u16>,
+    backoff_time: Option<u16>,
+    watering_time: Option<u16>,
 }
 impl Sensor<SensorBuilder> for MenuSensor {
     fn first(builder: SensorBuilder) -> Option<Self> {
@@ -111,17 +131,23 @@ impl Sensor<SensorBuilder> for MenuSensor {
         });
         builder.lean_sensor_from_id(id)
     }
-    fn get_setting(&self) -> u16 {
+    fn get_threshold(&self) -> u16 {
         self.threshold.unwrap_or(0)
+    }
+    fn get_backoff_time(&self) -> u16 {
+        self.backoff_time.unwrap_or(0)
+    }
+    fn get_watering_time(&self) -> u16 {
+        self.watering_time.unwrap_or(0)
     }
     fn get_id(&self) -> u8 {
         self.id
     }
-    fn get_status(&self) -> u16 {
+    fn get_moisture(&self) -> u16 {
         self.moisture.unwrap_or(0)
     }
-    fn increase_setting(mut self, mut _builder: SensorBuilder) -> Option<Self> {
-        info!("increase");
+    fn increase_threshold(mut self, mut _builder: SensorBuilder) -> Option<Self> {
+        trace!("increase threshold");
         if let Some(threshold) = self.threshold {
             self.threshold = Some(threshold.saturating_add(MOISTURE_INCREMENT_STEP_SIZE));
         } else {
@@ -130,8 +156,8 @@ impl Sensor<SensorBuilder> for MenuSensor {
         self.send_over_can();
         Some(self)
     }
-    fn decrease_setting(mut self, mut _builder: SensorBuilder) -> Option<Self> {
-        info!("decrease");
+    fn decrease_threshold(mut self, mut _builder: SensorBuilder) -> Option<Self> {
+        trace!("decrease threshold");
         if let Some(threshold) = self.threshold {
             self.threshold = Some(threshold.saturating_sub(MOISTURE_INCREMENT_STEP_SIZE));
         } else {
@@ -140,13 +166,57 @@ impl Sensor<SensorBuilder> for MenuSensor {
         self.send_over_can();
         Some(self)
     }
+    fn increase_backoff_time(mut self, mut _builder: SensorBuilder) -> Option<Self> {
+        trace!("increase backoff_time");
+        if let Some(backoff_time) = self.backoff_time {
+            self.backoff_time = Some(backoff_time.saturating_add(MOISTURE_INCREMENT_STEP_SIZE));
+        } else {
+            self.backoff_time = None
+        }
+        self.send_over_can();
+        Some(self)
+    }
+    fn decrease_backoff_time(mut self, mut _builder: SensorBuilder) -> Option<Self> {
+        trace!("decrease backoff_time");
+        if let Some(backoff_time) = self.backoff_time {
+            self.backoff_time = Some(backoff_time.saturating_sub(MOISTURE_INCREMENT_STEP_SIZE));
+        } else {
+            self.backoff_time = None
+        }
+        self.send_over_can();
+        Some(self)
+    }
+    fn increase_watering_time(mut self, mut _builder: SensorBuilder) -> Option<Self> {
+        trace!("increase watering_time");
+        if let Some(watering_time) = self.watering_time {
+            self.watering_time = Some(watering_time.saturating_add(MOISTURE_INCREMENT_STEP_SIZE));
+        } else {
+            self.watering_time = None
+        }
+        self.send_over_can();
+        Some(self)
+    }
+    fn decrease_watering_time(mut self, mut _builder: SensorBuilder) -> Option<Self> {
+        trace!("decrease watering_time");
+        if let Some(watering_time) = self.watering_time {
+            self.watering_time = Some(watering_time.saturating_sub(MOISTURE_INCREMENT_STEP_SIZE));
+        } else {
+            self.watering_time = None
+        }
+        self.send_over_can();
+        Some(self)
+    }
 }
 
 impl MenuSensor {
     fn send_over_can(&mut self) {
-        if let Some(threshold) = self.threshold {
+        if let (Some(threshold), Some(watering_time), Some(backoff_time)) =
+            (self.threshold, self.watering_time, self.backoff_time)
+        {
             let mut tx = self.builder.can_tx;
-            set_value(&mut tx, Commands::Threshold, threshold, self.id)
+            set_value(&mut tx, Commands::Threshold, threshold, self.id);
+            set_value(&mut tx, Commands::WateringTime, watering_time, self.id);
+            set_value(&mut tx, Commands::BackoffTime, backoff_time, self.id);
         }
     }
 }
