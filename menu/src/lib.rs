@@ -20,18 +20,29 @@ pub enum State<T> {
     SensorsSelect,
     Errors,
     SensorSelection(Option<T>),
-    SensorSettings(Option<T>),
+    SensorSettingSelectionThreshold(Option<T>),
+    SensorSettingSelectionBackoffTime(Option<T>),
+    SensorSettingSelectionWateringTime(Option<T>),
+    SensorSettingThreshold(Option<T>),
+    SensorSettingBackoffTime(Option<T>),
+    SensorSettingWateringTime(Option<T>),
 }
 
 pub trait Sensor<B>: Sized {
     fn first(builder: B) -> Option<Self>;
     fn next(self, builder: B) -> Option<Self>;
     fn prev(self, builder: B) -> Option<Self>;
-    fn get_setting(&self) -> u16;
-    fn get_status(&self) -> u16;
+    fn get_threshold(&self) -> u16;
+    fn get_backoff_time(&self) -> u16;
+    fn get_watering_time(&self) -> u16;
+    fn get_moisture(&self) -> u16;
     fn get_id(&self) -> u8;
-    fn increase_setting(self, builder: B) -> Option<Self>;
-    fn decrease_setting(self, builder: B) -> Option<Self>;
+    fn increase_threshold(self, builder: B) -> Option<Self>;
+    fn decrease_threshold(self, builder: B) -> Option<Self>;
+    fn increase_backoff_time(self, builder: B) -> Option<Self>;
+    fn decrease_backoff_time(self, builder: B) -> Option<Self>;
+    fn increase_watering_time(self, builder: B) -> Option<Self>;
+    fn decrease_watering_time(self, builder: B) -> Option<Self>;
     #[allow(async_fn_in_trait)]
     async fn populate(self, builder: B) -> Option<Self>;
 }
@@ -53,8 +64,8 @@ impl<T: Sensor<B> + Clone, B: Clone> MenuRunner<T, B> {
             State::SensorSelection(Some(sensor)) => {
                 State::SensorSelection(sensor.populate(self.builder.clone()).await)
             }
-            State::SensorSettings(Some(sensor)) => {
-                State::SensorSettings(sensor.populate(self.builder.clone()).await)
+            State::SensorSettingThreshold(Some(sensor)) => {
+                State::SensorSettingThreshold(sensor.populate(self.builder.clone()).await)
             }
             s => s,
         };
@@ -69,7 +80,6 @@ impl<T: Sensor<B> + Clone, B: Clone> MenuRunner<T, B> {
             (SensorsSelect, Right) => Errors,
             (SensorsSelect, Enter) => SensorSelection(Sensor::first(self.builder.clone())),
             (SensorsSelect, _) => SensorsSelect,
-            (SensorSelection(sensor), Enter) => SensorSettings(sensor),
             (SensorSelection(Some(sensor)), Right) => {
                 SensorSelection(sensor.next(self.builder.clone()))
             }
@@ -77,37 +87,114 @@ impl<T: Sensor<B> + Clone, B: Clone> MenuRunner<T, B> {
                 SensorSelection(sensor.prev(self.builder.clone()))
             }
             (SensorSelection(None), Left | Right) => SensorSelection(None),
-            (SensorSettings(Some(sensor)), Left) => {
-                SensorSettings(sensor.increase_setting(self.builder.clone()))
-            }
-            (SensorSettings(None), Left | Right) => SensorSettings(None),
-            (SensorSettings(Some(sensor)), Right) => {
-                SensorSettings(sensor.decrease_setting(self.builder.clone()))
-            }
             (SensorSelection(_), Back) => SensorsSelect,
-            (SensorSettings(sensor), Back) => SensorSelection(sensor),
-            (SensorSettings(sensor), Enter) => SensorSettings(sensor),
+            // selection of the possible settings
+            (SensorSelection(sensor), Enter) => SensorSettingSelectionThreshold(sensor),
+
+            (SensorSettingSelectionThreshold(sensor), Left) => {
+                SensorSettingSelectionThreshold(sensor)
+            }
+            (SensorSettingSelectionThreshold(sensor), Right) => {
+                SensorSettingSelectionBackoffTime(sensor)
+            }
+            (SensorSettingSelectionBackoffTime(sensor), Left) => {
+                SensorSettingSelectionThreshold(sensor)
+            }
+            (SensorSettingSelectionBackoffTime(sensor), Right) => {
+                SensorSettingSelectionWateringTime(sensor)
+            }
+            (SensorSettingSelectionWateringTime(sensor), Left) => {
+                SensorSettingSelectionBackoffTime(sensor)
+            }
+            (SensorSettingSelectionWateringTime(sensor), Right) => {
+                SensorSettingSelectionWateringTime(sensor)
+            }
+            // getting back from setting selection
+            (SensorSettingSelectionThreshold(sensor), Back) => SensorSelection(sensor),
+            (SensorSettingSelectionBackoffTime(sensor), Back) => SensorSelection(sensor),
+            (SensorSettingSelectionWateringTime(sensor), Back) => SensorSelection(sensor),
+
+            // entering the settings
+            (SensorSettingSelectionThreshold(sensor), Enter) => SensorSettingThreshold(sensor),
+            (SensorSettingSelectionBackoffTime(sensor), Enter) => SensorSettingBackoffTime(sensor),
+            (SensorSettingSelectionWateringTime(sensor), Enter) => {
+                SensorSettingWateringTime(sensor)
+            }
+            // threshold setting
+            (SensorSettingThreshold(Some(sensor)), Left) => {
+                SensorSettingThreshold(sensor.increase_threshold(self.builder.clone()))
+            }
+            (SensorSettingThreshold(None), Left | Right) => SensorSettingThreshold(None),
+            (SensorSettingThreshold(Some(sensor)), Right) => {
+                SensorSettingThreshold(sensor.decrease_threshold(self.builder.clone()))
+            }
+            (SensorSettingThreshold(sensor), Back) => SensorSettingSelectionThreshold(sensor),
+            (SensorSettingThreshold(sensor), Enter) => SensorSettingThreshold(sensor),
+            // backoff setting
+            (SensorSettingBackoffTime(Some(sensor)), Left) => {
+                SensorSettingBackoffTime(sensor.increase_backoff_time(self.builder.clone()))
+            }
+            (SensorSettingBackoffTime(None), Left | Right) => SensorSettingBackoffTime(None),
+            (SensorSettingBackoffTime(Some(sensor)), Right) => {
+                SensorSettingBackoffTime(sensor.decrease_backoff_time(self.builder.clone()))
+            }
+            (SensorSettingBackoffTime(sensor), Back) => SensorSettingSelectionBackoffTime(sensor),
+            (SensorSettingBackoffTime(sensor), Enter) => SensorSettingBackoffTime(sensor),
+            // watering time setting
+            (SensorSettingWateringTime(Some(sensor)), Left) => {
+                SensorSettingWateringTime(sensor.increase_watering_time(self.builder.clone()))
+            }
+            (SensorSettingWateringTime(None), Left | Right) => SensorSettingWateringTime(None),
+            (SensorSettingWateringTime(Some(sensor)), Right) => {
+                SensorSettingWateringTime(sensor.decrease_watering_time(self.builder.clone()))
+            }
+            (SensorSettingWateringTime(sensor), Back) => SensorSettingSelectionWateringTime(sensor),
+            (SensorSettingWateringTime(sensor), Enter) => SensorSettingWateringTime(sensor),
         }
     }
 }
 impl<T: Sensor<B> + Clone, B> Display for MenuRunner<T, B> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        use State::*;
         match self.state.clone() {
-            State::SensorsSelect => write!(f, "Sensors"),
-            State::Errors => write!(f, "errors"),
-            State::SensorSelection(Some(sensor)) => {
+            SensorsSelect => write!(f, "Sensors"),
+            Errors => write!(f, "errors"),
+            SensorSelection(Some(sensor)) => {
                 write!(
                     f,
                     "Topf:{}Feu:{}\nMess:{}",
                     sensor.get_id(),
-                    sensor.get_setting(),
-                    sensor.get_status()
+                    sensor.get_threshold(),
+                    sensor.get_moisture()
                 )
             }
-            State::SensorSelection(None) | State::SensorSettings(None) => {
+            SensorSelection(None)
+            | SensorSettingThreshold(None)
+            | SensorSettingSelectionThreshold(None)
+            | SensorSettingWateringTime(None)
+            | SensorSettingSelectionWateringTime(None)
+            | SensorSettingBackoffTime(None)
+            | SensorSettingSelectionBackoffTime(None) => {
                 write!(f, "missing\ngo back")
             }
-            State::SensorSettings(Some(sensor)) => write!(f, "Feuchte:{}", sensor.get_setting()),
+            SensorSettingThreshold(Some(sensor)) => {
+                write!(f, "Feuchte:{}\nEditable", sensor.get_threshold())
+            }
+            SensorSettingSelectionThreshold(Some(sensor)) => {
+                write!(f, "Feuchte: {}\nAuswahl", sensor.get_threshold())
+            }
+            SensorSettingWateringTime(Some(sensor)) => {
+                write!(f, "Bewaes:{}\nEditable", sensor.get_watering_time())
+            }
+            SensorSettingSelectionWateringTime(Some(sensor)) => {
+                write!(f, "Bewaes: {}\nAuswahl", sensor.get_watering_time())
+            }
+            SensorSettingBackoffTime(Some(sensor)) => {
+                write!(f, "Warte:{}\nEditable", sensor.get_backoff_time())
+            }
+            SensorSettingSelectionBackoffTime(Some(sensor)) => {
+                write!(f, "Warte: {}\nAuswahl", sensor.get_backoff_time())
+            }
         }
     }
 }
