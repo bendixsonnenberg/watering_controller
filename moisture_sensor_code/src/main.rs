@@ -128,6 +128,8 @@ async fn main(_spawner: Spawner) {
 #[embassy_executor::task]
 async fn handle_valve(resources: ValveResources) {
     let mut adc = adc::Adc::new(resources.adc);
+    // maximum sample time for more stable readings
+    adc.set_sample_time(adc::SampleTime::CYCLES239_5);
     info!("starting handle valve");
     let mut moisture_level_pin = resources.moisture_pin;
     let mut valve_pin = Output::new(resources.valve_pin, Level::Low, Speed::Low);
