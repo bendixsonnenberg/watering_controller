@@ -181,19 +181,19 @@ impl<T: Sensor<B> + Clone, B> Display for MenuRunner<T, B> {
                 write!(f, "Feuchte:{}\nEditable", sensor.get_threshold())
             }
             SensorSettingSelectionThreshold(Some(sensor)) => {
-                write!(f, "Feuchte: {}\nAuswahl", sensor.get_threshold())
+                write!(f, "Feuchte:{}\nAuswahl", sensor.get_threshold())
             }
             SensorSettingWateringTime(Some(sensor)) => {
-                write!(f, "Bewaes:{}\nEditable", sensor.get_watering_time())
+                write!(f, "Bewaes:{}s\nEditable", sensor.get_watering_time())
             }
             SensorSettingSelectionWateringTime(Some(sensor)) => {
-                write!(f, "Bewaes: {}\nAuswahl", sensor.get_watering_time())
+                write!(f, "Bewaes:{}s\nAuswahl", sensor.get_watering_time())
             }
             SensorSettingBackoffTime(Some(sensor)) => {
-                write!(f, "Warte:{}\nEditable", sensor.get_backoff_time())
+                write!(f, "Warte:{}min\nEditable", sensor.get_backoff_time())
             }
             SensorSettingSelectionBackoffTime(Some(sensor)) => {
-                write!(f, "Warte: {}\nAuswahl", sensor.get_backoff_time())
+                write!(f, "Warte:{}min\nAuswahl", sensor.get_backoff_time())
             }
         }
     }
