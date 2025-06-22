@@ -21,13 +21,13 @@ impl Sensor<Rc<RefCell<SensorBuilder>>> for FakeSensor {
     fn prev(self, builder: Rc<RefCell<SensorBuilder>>) -> Self {
         builder.borrow_mut().prev(self.id).clone()
     }
-    fn get_setting(&self) -> u16 {
+    fn get_threshold(&self) -> u16 {
         self.moisture
     }
     fn get_id(&self) -> u8 {
         self.id
     }
-    fn increase_setting(mut self, builder: Rc<RefCell<SensorBuilder>>) -> Self {
+    fn increase_threshold(mut self, builder: Rc<RefCell<SensorBuilder>>) -> Self {
         let pos = builder.borrow().pos(self.id);
         // update global repository
         builder.borrow_mut().sensors.get_mut(pos).unwrap().moisture += 1;
@@ -35,7 +35,7 @@ impl Sensor<Rc<RefCell<SensorBuilder>>> for FakeSensor {
         self.moisture += 1;
         self
     }
-    fn decrease_setting(mut self, builder: Rc<RefCell<SensorBuilder>>) -> Self {
+    fn decrease_threshold(mut self, builder: Rc<RefCell<SensorBuilder>>) -> Self {
         let pos = builder.borrow().pos(self.id);
         // update global repository
         builder.borrow_mut().sensors.get_mut(pos).unwrap().moisture -= 1;
