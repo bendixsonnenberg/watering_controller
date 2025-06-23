@@ -131,21 +131,21 @@ impl<T: Sensor<B> + Clone, B: Clone> MenuRunner<T, B> {
             (SensorSettingThreshold(sensor), Back) => SensorSettingSelectionThreshold(sensor),
             (SensorSettingThreshold(sensor), Enter) => SensorSettingThreshold(sensor),
             // backoff setting
-            (SensorSettingBackoffTime(Some(sensor)), Left) => {
+            (SensorSettingBackoffTime(Some(sensor)), Right) => {
                 SensorSettingBackoffTime(sensor.increase_backoff_time(self.builder.clone()))
             }
             (SensorSettingBackoffTime(None), Left | Right) => SensorSettingBackoffTime(None),
-            (SensorSettingBackoffTime(Some(sensor)), Right) => {
+            (SensorSettingBackoffTime(Some(sensor)), Left) => {
                 SensorSettingBackoffTime(sensor.decrease_backoff_time(self.builder.clone()))
             }
             (SensorSettingBackoffTime(sensor), Back) => SensorSettingSelectionBackoffTime(sensor),
             (SensorSettingBackoffTime(sensor), Enter) => SensorSettingBackoffTime(sensor),
             // watering time setting
-            (SensorSettingWateringTime(Some(sensor)), Left) => {
+            (SensorSettingWateringTime(Some(sensor)), Right) => {
                 SensorSettingWateringTime(sensor.increase_watering_time(self.builder.clone()))
             }
             (SensorSettingWateringTime(None), Left | Right) => SensorSettingWateringTime(None),
-            (SensorSettingWateringTime(Some(sensor)), Right) => {
+            (SensorSettingWateringTime(Some(sensor)), Left) => {
                 SensorSettingWateringTime(sensor.decrease_watering_time(self.builder.clone()))
             }
             (SensorSettingWateringTime(sensor), Back) => SensorSettingSelectionWateringTime(sensor),
