@@ -33,6 +33,9 @@
             pkgs.libusb1
             pkgs.probe-rs
             pkgs.picotool
+            # for displaying the plot
+            pkgs.python314
+            pkgs.gnuplot
           ];
 
         };
