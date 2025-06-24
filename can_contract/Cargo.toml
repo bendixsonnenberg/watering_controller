@@ -4,6 +4,8 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+bitflags = { version = "2.9.1", default-features = false }
 byteorder = {version = "1.5.0", default-features=false}
 embedded-can = "0.4.1"
+mcp2515 = "0.3.0"
 strum = { version = "0.27.1", default-features = false, features = ["derive", "strum_macros"] }
