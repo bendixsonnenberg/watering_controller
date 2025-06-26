@@ -245,7 +245,7 @@ fn buf_from_command_data(data: CommandData, src_id: Option<DevId>) -> [u8; DLC] 
         [0; DLC]
     }
 }
-pub fn id_from_command_and_dev_id(command: CommandData, id: DevId) -> Option<StandardId> {
+fn id_from_command_and_dev_id(command: CommandData, id: DevId) -> Option<StandardId> {
     let command = match command {
         CommandData::Settings(_, _, _) => Commands::Settings,
         CommandData::Sensors(_, _, _) => Commands::Sensors,
@@ -257,7 +257,7 @@ pub fn id_from_command_and_dev_id(command: CommandData, id: DevId) -> Option<Sta
 
     StandardId::new(((command as u16) << 8) | id as u16)
 }
-pub fn create_data_buf_and_id(frame: CommandDataContainer) -> ([u8; DLC], StandardId) {
+fn create_data_buf_and_id(frame: CommandDataContainer) -> ([u8; DLC], StandardId) {
     //TODO move buf into match for variable length buffers
     let (target_id, src_id, data) = match frame {
         CommandDataContainer::Data {
@@ -269,12 +269,13 @@ pub fn create_data_buf_and_id(frame: CommandDataContainer) -> ([u8; DLC], Standa
     };
 
     let buf = buf_from_command_data(data, src_id);
-
+  271      let buf = buf_from_command_data(data, src_id);                                                                                                                                       271      let buf = buf_from_command_data(data, src_id);                                                                                                                                     src_id
     let id = id_from_command_and_dev_id(data, target_id)
         .expect("only allowed ids will be passed by the command enum");
     (buf, id)
 }
-pub fn to_embedded_can_frame<U: embedded_can::Frame>(frame: CommandDataContainer) -> Option<U> {
+/// creates a frame of a generic type when given a ComandDataContainer
+pub fn command_data_to_frame<U: embedded_can::Frame>(frame: CommandDataContainer) -> Option<U> {
     let (buf, id) = create_data_buf_and_id(frame);
     match frame {
         CommandDataContainer::Data {
