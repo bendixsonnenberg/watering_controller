@@ -6,7 +6,7 @@ use embassy_time::Timer;
 use menu::{MenuRunner, Sensor};
 
 use heapless::String;
-use lcd_lcm1602_i2c::sync_lcd::Lcd;
+use lcd_lcm1602_i2c::async_lcd::Lcd;
 
 use crate::can::{CanReceiver, CanSender, get_value, set_value};
 use crate::{DisplayI2C, Irqs, MenuInput, SensorBitmap};
@@ -17,6 +17,9 @@ use embassy_rp::pio_programs::rotary_encoder::{Direction, PioEncoder, PioEncoder
 use log::*;
 
 const MOISTURE_INCREMENT_STEP_SIZE: u16 = 10;
+const BACKOFF_TIME_INCREMENT_STEP_SIZE: u16 = 1;
+const WATERING_TIME_INCREMENT_STEP_SIZE: u16 = 1;
+
 const FOCUS_COLOR: CommandData = CommandData::Light(0b11111, 0, 0);
 #[derive(Clone, Copy)]
 
@@ -34,6 +37,8 @@ impl SensorBuilder {
                     id: id as u8,
                     threshold: None,
                     moisture: None,
+                    backoff_time: None,
+                    watering_time: None,
                 });
             }
         }
@@ -42,38 +47,54 @@ impl SensorBuilder {
     }
     // try to get the threshold for this sensor, if it failes return none
     async fn populate(mut self, mut sensor: MenuSensor) -> Option<MenuSensor> {
-        info!(
+        trace!(
             "populating with: id: {}, threshold: {:?}",
             sensor.id, sensor.threshold
         );
-        if let Some(CommandData::Threshold(threshold)) = get_value(
-            &mut self.can_tx,
-            &mut self.can_rx,
-            Commands::Threshold,
-            sensor.id,
-            &self.sensors,
-        )
-        .await
-        {
-            sensor.threshold = Some(threshold);
-        } else {
-            error!("failed at getting threshold value");
-            return None;
-        }
-        if let Some(CommandData::Moisture(moisture)) = get_value(
-            &mut self.can_tx,
-            &mut self.can_rx,
-            Commands::Moisture,
-            sensor.id,
-            &self.sensors,
-        )
-        .await
-        {
-            sensor.moisture = Some(moisture);
-        } else {
-            error!("failed at getting moisture");
-            return None;
-        }
+        sensor.moisture = Some(
+            get_value(
+                &mut self.can_tx,
+                &mut self.can_rx,
+                Commands::Moisture,
+                sensor.id,
+                &self.sensors,
+            )
+            .await?,
+        );
+        trace!("got moisture");
+        sensor.threshold = Some(
+            get_value(
+                &mut self.can_tx,
+                &mut self.can_rx,
+                Commands::Threshold,
+                sensor.id,
+                &self.sensors,
+            )
+            .await?,
+        );
+        trace!("got threshold");
+        sensor.backoff_time = Some(
+            get_value(
+                &mut self.can_tx,
+                &mut self.can_rx,
+                Commands::BackoffTime,
+                sensor.id,
+                &self.sensors,
+            )
+            .await?,
+        );
+        trace!("got backoff_time");
+        sensor.watering_time = Some(
+            get_value(
+                &mut self.can_tx,
+                &mut self.can_rx,
+                Commands::WateringTime,
+                sensor.id,
+                &self.sensors,
+            )
+            .await?,
+        );
+        trace!("got watering_time");
         Some(sensor)
     }
     fn focus(mut self, sensor: MenuSensor) {
@@ -95,6 +116,8 @@ struct MenuSensor {
     id: u8,
     threshold: Option<u16>,
     moisture: Option<u16>,
+    backoff_time: Option<u16>,
+    watering_time: Option<u16>,
 }
 impl Sensor<SensorBuilder> for MenuSensor {
     fn first(builder: SensorBuilder) -> Option<Self> {
@@ -130,17 +153,23 @@ impl Sensor<SensorBuilder> for MenuSensor {
         });
         builder.lean_sensor_from_id(id)
     }
-    fn get_setting(&self) -> u16 {
+    fn get_threshold(&self) -> u16 {
         self.threshold.unwrap_or(0)
+    }
+    fn get_backoff_time(&self) -> u16 {
+        self.backoff_time.unwrap_or(0)
+    }
+    fn get_watering_time(&self) -> u16 {
+        self.watering_time.unwrap_or(0)
     }
     fn get_id(&self) -> u8 {
         self.id
     }
-    fn get_status(&self) -> u16 {
+    fn get_moisture(&self) -> u16 {
         self.moisture.unwrap_or(0)
     }
-    fn increase_setting(mut self, mut _builder: SensorBuilder) -> Option<Self> {
-        info!("increase");
+    fn increase_threshold(mut self, mut _builder: SensorBuilder) -> Option<Self> {
+        trace!("increase threshold");
         if let Some(threshold) = self.threshold {
             self.threshold = Some(threshold.saturating_add(MOISTURE_INCREMENT_STEP_SIZE));
         } else {
@@ -149,8 +178,8 @@ impl Sensor<SensorBuilder> for MenuSensor {
         self.send_over_can();
         Some(self)
     }
-    fn decrease_setting(mut self, mut _builder: SensorBuilder) -> Option<Self> {
-        info!("decrease");
+    fn decrease_threshold(mut self, mut _builder: SensorBuilder) -> Option<Self> {
+        trace!("decrease threshold");
         if let Some(threshold) = self.threshold {
             self.threshold = Some(threshold.saturating_sub(MOISTURE_INCREMENT_STEP_SIZE));
         } else {
@@ -159,39 +188,80 @@ impl Sensor<SensorBuilder> for MenuSensor {
         self.send_over_can();
         Some(self)
     }
+    fn increase_backoff_time(mut self, mut _builder: SensorBuilder) -> Option<Self> {
+        trace!("increase backoff_time");
+        if let Some(backoff_time) = self.backoff_time {
+            self.backoff_time = Some(backoff_time.saturating_add(BACKOFF_TIME_INCREMENT_STEP_SIZE));
+        } else {
+            self.backoff_time = None
+        }
+        self.send_over_can();
+        Some(self)
+    }
+    fn decrease_backoff_time(mut self, mut _builder: SensorBuilder) -> Option<Self> {
+        trace!("decrease backoff_time");
+        if let Some(backoff_time) = self.backoff_time {
+            self.backoff_time = Some(backoff_time.saturating_sub(BACKOFF_TIME_INCREMENT_STEP_SIZE));
+        } else {
+            self.backoff_time = None
+        }
+        self.send_over_can();
+        Some(self)
+    }
+    fn increase_watering_time(mut self, mut _builder: SensorBuilder) -> Option<Self> {
+        trace!("increase watering_time");
+        if let Some(watering_time) = self.watering_time {
+            self.watering_time =
+                Some(watering_time.saturating_add(WATERING_TIME_INCREMENT_STEP_SIZE));
+        } else {
+            self.watering_time = None
+        }
+        self.send_over_can();
+        Some(self)
+    }
+    fn decrease_watering_time(mut self, mut _builder: SensorBuilder) -> Option<Self> {
+        trace!("decrease watering_time");
+        if let Some(watering_time) = self.watering_time {
+            self.watering_time =
+                Some(watering_time.saturating_sub(WATERING_TIME_INCREMENT_STEP_SIZE));
+        } else {
+            self.watering_time = None
+        }
+        self.send_over_can();
+        Some(self)
+    }
 }
 
 impl MenuSensor {
     fn send_over_can(&mut self) {
-        if let Some(threshold) = self.threshold {
+        if let (Some(threshold), Some(watering_time), Some(backoff_time)) =
+            (self.threshold, self.watering_time, self.backoff_time)
+        {
             let mut tx = self.builder.can_tx;
-            set_value(
-                &mut tx,
-                Commands::Threshold,
-                can_contract::CommandData::Threshold(threshold),
-                self.id,
-            )
+            set_value(&mut tx, Commands::Threshold, threshold, self.id);
+            set_value(&mut tx, Commands::WateringTime, watering_time, self.id);
+            set_value(&mut tx, Commands::BackoffTime, backoff_time, self.id);
         }
     }
 }
-fn write_two_lines(
-    lcd: &mut Lcd<'_, i2c::I2c<'_, I2C1, i2c::Blocking>, embassy_time::Delay>,
+async fn write_two_lines(
+    lcd: &mut Lcd<'_, i2c::I2c<'_, I2C1, i2c::Async>, embassy_time::Delay>,
     text: &str,
 ) {
-    let _ = lcd.clear();
-    let _ = lcd.set_cursor(0, 0);
+    let _ = lcd.clear().await;
+    let _ = lcd.set_cursor(0, 0).await;
     let (first, second) = match text.split_once(|c| c == '\n') {
         Some((first, second)) => (first, second),
         None => (text, ""),
     };
-    match lcd.write_str(first) {
+    match lcd.write_str(first).await {
         Ok(_) => {}
         Err(e) => {
             info!("{:?}", e);
         }
     }
-    let _ = lcd.set_cursor(1, 0);
-    match lcd.write_str(second) {
+    let _ = lcd.set_cursor(1, 0).await;
+    match lcd.write_str(second).await {
         Ok(_) => {}
         Err(e) => {
             info!("{:?}", e);
@@ -213,19 +283,21 @@ pub async fn menu_handle(
             can_tx,
             can_rx,
         });
-    let mut i2c = i2c::I2c::new_blocking(
+    let mut i2c = i2c::I2c::new_async(
         display_resources.i2c,
         display_resources.sdc,
         display_resources.sda,
+        Irqs,
         i2c::Config::default(),
     );
     info!("created i2c");
     let mut delay = embassy_time::Delay;
-    let mut lcd = match lcd_lcm1602_i2c::sync_lcd::Lcd::new(&mut i2c, &mut delay)
+    let mut lcd = match lcd_lcm1602_i2c::async_lcd::Lcd::new(&mut i2c, &mut delay)
         .with_address(ADDR)
         .with_rows(2)
         .with_cursor_on(false)
         .init()
+        .await
     {
         Ok(lcd) => lcd,
         Err(e) => {
@@ -255,7 +327,7 @@ pub async fn menu_handle(
         let Ok(_) = core::writeln!(&mut buffer, "{}", runner) else {
             break;
         };
-        write_two_lines(&mut lcd, buffer.as_str());
+        write_two_lines(&mut lcd, buffer.as_str()).await;
         match embassy_futures::select::select3(
             back_button.wait_for_falling_edge(),
             enter_button.wait_for_falling_edge(),

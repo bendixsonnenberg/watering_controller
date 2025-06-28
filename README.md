@@ -43,6 +43,7 @@ I'll try to update regularly – who knows, this might one day attract public in
 
 -Philipp
 ## Milestones
-June '25: working menu on LCD-Display with individual IDs and live data, navigation possible through rotary encoder "return"-button
+June '25: working menu on LCD-Display with individual IDs and live data, navigation possible through rotary encoder and "return"-button  
+June '25: data saved, showing 9 day continuous watering without crashes or similar issues; moisture level plausible
 ## Status History
 editing pending...

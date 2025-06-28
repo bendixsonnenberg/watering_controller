@@ -28,4 +28,4 @@ rp-controller/out.uf2
 rp-controller/hex1
 rp-controller/out1.uf2
 menu/Cargo.lock
-hardware
+logfiles/parsed_data.txt

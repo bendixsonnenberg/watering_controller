@@ -67,7 +67,7 @@ embedded-can = "0.4.1"
 can_contract = {version="*", path="../can_contract/"}
 menu = {version="*", path="../menu/"}
 bitmaps = { version = "3.2.1", default-features = false }
-lcd-lcm1602-i2c = "0.3.0"
+lcd-lcm1602-i2c =  {version = "0.3.0", features = ["async"]}
 [patch.crates-io]
 embassy-rp = {git = "https://github.com/embassy-rs/embassy", rev="7e78e58"}
 embassy-time = {git = "https://github.com/embassy-rs/embassy", rev="7e78e58"}

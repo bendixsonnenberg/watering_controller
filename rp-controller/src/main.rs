@@ -100,6 +100,7 @@ bind_interrupts!(struct Irqs {
     PIO1_IRQ_0 => InterruptHandler<PIO1>;
     USBCTRL_IRQ => embassy_rp::usb::InterruptHandler<USB>;
     ADC_IRQ_FIFO => embassy_rp::adc::InterruptHandler;
+    I2C1_IRQ => embassy_rp::i2c::InterruptHandler<embassy_rp::peripherals::I2C1>;
 
 });
 
