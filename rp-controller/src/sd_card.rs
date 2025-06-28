@@ -1,6 +1,6 @@
 use crate::can::{CanReceiver, get_value};
 use crate::{CanSender, SensorBitmap, SpiSdcard};
-use can_contract::{CommandData, Commands};
+use can_contract::CommandData;
 use core::fmt::Write;
 use embassy_rp::gpio::{Level, Output};
 use embassy_rp::spi;
@@ -92,13 +92,26 @@ pub async fn sd_card_log(
                 let mut buffer: String<64> = String::new();
                 for sensor in sensors_map.into_iter() {
                     let id = sensor as u8;
-                    let Some(CommandData::Moisture(moisture)) =
-                        get_value(&mut can_tx, &mut can_rx, Commands::Moisture, id, sensors).await
+                    let Some(CommandData::Sensors(Some(moisture), _temp, _humidity)) = get_value(
+                        &mut can_tx,
+                        &mut can_rx,
+                        CommandData::Sensors(None, None, None),
+                        id,
+                        sensors,
+                    )
+                    .await
                     else {
                         continue;
                     };
-                    let Some(CommandData::Threshold(threshold)) =
-                        get_value(&mut can_tx, &mut can_rx, Commands::Threshold, id, sensors).await
+                    let Some(CommandData::Settings(threshold, _backoff_time, _watering_time)) =
+                        get_value(
+                            &mut can_tx,
+                            &mut can_rx,
+                            CommandData::Settings(0, 0, 0),
+                            id,
+                            sensors,
+                        )
+                        .await
                     else {
                         continue;
                     };

@@ -10,7 +10,7 @@ use lcd_lcm1602_i2c::async_lcd::Lcd;
 
 use crate::can::{CanReceiver, CanSender, get_value, set_value};
 use crate::{DisplayI2C, Irqs, MenuInput, SensorBitmap};
-use can_contract::{CommandData, Commands};
+use can_contract::{CommandData, CommandDataContainer};
 use core::fmt::Write;
 use embassy_rp::i2c;
 use embassy_rp::pio_programs::rotary_encoder::{Direction, PioEncoder, PioEncoderProgram};
@@ -51,61 +51,52 @@ impl SensorBuilder {
             "populating with: id: {}, threshold: {:?}",
             sensor.id, sensor.threshold
         );
-        sensor.moisture = Some(
-            get_value(
-                &mut self.can_tx,
-                &mut self.can_rx,
-                Commands::Moisture,
-                sensor.id,
-                &self.sensors,
-            )
-            .await?,
-        );
-        trace!("got moisture");
-        sensor.threshold = Some(
-            get_value(
-                &mut self.can_tx,
-                &mut self.can_rx,
-                Commands::Threshold,
-                sensor.id,
-                &self.sensors,
-            )
-            .await?,
-        );
-        trace!("got threshold");
-        sensor.backoff_time = Some(
-            get_value(
-                &mut self.can_tx,
-                &mut self.can_rx,
-                Commands::BackoffTime,
-                sensor.id,
-                &self.sensors,
-            )
-            .await?,
-        );
-        trace!("got backoff_time");
-        sensor.watering_time = Some(
-            get_value(
-                &mut self.can_tx,
-                &mut self.can_rx,
-                Commands::WateringTime,
-                sensor.id,
-                &self.sensors,
-            )
-            .await?,
-        );
-        trace!("got watering_time");
+        if let CommandData::Sensors(moisture, _temp, _humidity) = get_value(
+            &mut self.can_tx,
+            &mut self.can_rx,
+            CommandData::Sensors(None, None, None),
+            sensor.id,
+            &self.sensors,
+        )
+        .await?
+        {
+            sensor.moisture = moisture;
+            trace!("got moisture");
+        };
+        if let CommandData::Settings(threshold, backoff_time, watering_time) = get_value(
+            &mut self.can_tx,
+            &mut self.can_rx,
+            CommandData::Settings(0, 0, 0),
+            sensor.id,
+            &self.sensors,
+        )
+        .await?
+        {
+            sensor.threshold = Some(threshold);
+            sensor.backoff_time = Some(backoff_time);
+            sensor.watering_time = Some(watering_time);
+            info!("Got threshold, backoff_time, watering_time");
+        };
         Some(sensor)
     }
     fn focus(mut self, sensor: MenuSensor) {
-        set_value(&mut self.can_tx, Commands::Light, FOCUS_COLOR, sensor.id);
+        set_value(
+            &mut self.can_tx,
+            CommandDataContainer::Data {
+                target_id: sensor.id,
+                src_id: 0,
+                data: FOCUS_COLOR,
+            },
+        );
     }
     fn unfocus(mut self, sensor: MenuSensor) {
         set_value(
             &mut self.can_tx,
-            Commands::Light,
-            CommandData::Light(0, 0, 0),
-            sensor.id,
+            CommandDataContainer::Data {
+                target_id: sensor.id,
+                src_id: 0,
+                data: CommandData::LightOff,
+            },
         );
     }
 }
@@ -238,9 +229,14 @@ impl MenuSensor {
             (self.threshold, self.watering_time, self.backoff_time)
         {
             let mut tx = self.builder.can_tx;
-            set_value(&mut tx, Commands::Threshold, threshold, self.id);
-            set_value(&mut tx, Commands::WateringTime, watering_time, self.id);
-            set_value(&mut tx, Commands::BackoffTime, backoff_time, self.id);
+            set_value(
+                &mut tx,
+                CommandDataContainer::Data {
+                    target_id: self.id,
+                    src_id: 0,
+                    data: CommandData::Settings(threshold, backoff_time, watering_time),
+                },
+            )
         }
     }
 }

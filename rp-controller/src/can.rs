@@ -136,13 +136,13 @@ pub async fn can_task(
                                 });
                             }
                             CommandData::Settings(_, _, _) => {
-                                receive_channel.try_send(frame);
+                                let _res = receive_channel.try_send(frame);
                             }
                             CommandData::Light(_, _, _)
                             | CommandData::LightRandom
                             | CommandData::LightOff => {}
                             CommandData::Sensors(_, _, _) => {
-                                receive_channel.try_send(frame);
+                                let _res = receive_channel.try_send(frame);
                             }
                         }
                     }
