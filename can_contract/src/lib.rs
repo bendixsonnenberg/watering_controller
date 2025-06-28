@@ -269,7 +269,6 @@ fn create_data_buf_and_id(frame: CommandDataContainer) -> ([u8; DLC], StandardId
     };
 
     let buf = buf_from_command_data(data, src_id);
-  271      let buf = buf_from_command_data(data, src_id);                                                                                                                                       271      let buf = buf_from_command_data(data, src_id);                                                                                                                                     src_id
     let id = id_from_command_and_dev_id(data, target_id)
         .expect("only allowed ids will be passed by the command enum");
     (buf, id)
