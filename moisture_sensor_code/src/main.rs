@@ -129,7 +129,7 @@ async fn main(_spawner: Spawner) {
     // setup relay
     _spawner.spawn(handle_valve(r.valve_control)).unwrap();
     _spawner
-        .spawn(handle_modify_threshold(r.can_control))
+        .spawn(handle_can_communication(r.can_control))
         .unwrap();
     _spawner.spawn(led_control(r.led_pins)).unwrap();
     //
@@ -238,7 +238,7 @@ async fn handle_valve(resources: ValveResources) {
 }
 
 #[embassy_executor::task]
-async fn handle_modify_threshold(can_resources: CanResources) {
+async fn handle_can_communication(can_resources: CanResources) {
     let mut can = init_can(can_resources).await;
     trace!("can initiated");
 
@@ -255,123 +255,78 @@ async fn handle_modify_threshold(can_resources: CanResources) {
         if let Ok(env) = res {
             let frame = env.frame;
             trace!("frame received: {:?}", env);
-            let Some((command, _, data)) = frame_to_command_data(frame) else {
+            let Some(container) = frame_to_command_data(frame) else {
                 // ignore
                 // device id, has to be the id of this device anyways
                 continue;
             };
-            match data {
-                CommandData::Remote => match command {
-                    Commands::Threshold => {
-                        send_data_over_can(
-                            &mut can,
-                            CommandData::Threshold(SHARED.threshold.load(Ordering::Relaxed)),
-                            command,
-                            CONTROLLER_ID,
-                            dev_id,
-                        )
-                        .await;
+            let to_send = match container {
+                CommandDataContainer::Data {
+                    target_id: _,
+                    src_id: _,
+                    data,
+                } => match data {
+                    CommandData::Settings(threshold, backoff_time, watering_time) => {
+                        SHARED.threshold.store(threshold, Ordering::Relaxed);
+                        SHARED.backoff_time.store(backoff_time, Ordering::Relaxed);
+                        SHARED.watering_time.store(watering_time, Ordering::Relaxed);
+                        None
                     }
-                    Commands::Moisture => {
-                        send_data_over_can(
-                            &mut can,
-                            CommandData::Moisture(SHARED.moisture.load(Ordering::Relaxed)),
-                            command,
-                            CONTROLLER_ID,
-                            dev_id,
-                        )
-                        .await;
+                    CommandData::Light(red, green, blue) => {
+                        LED_SIGNAL.signal(LedState::Color(red, green, blue));
+                        None
                     }
-                    Commands::BackoffTime => {
-                        send_data_over_can(
-                            &mut can,
-                            CommandData::BackoffTime(SHARED.backoff_time.load(Ordering::Relaxed)),
-                            command,
-                            CONTROLLER_ID,
-                            dev_id,
-                        )
-                        .await;
+                    CommandData::LightRandom => {
+                        LED_SIGNAL.signal(LedState::Random);
+                        None
                     }
-                    Commands::WateringTime => {
-                        send_data_over_can(
-                            &mut can,
-                            CommandData::WateringTime(SHARED.watering_time.load(Ordering::Relaxed)),
-                            command,
-                            CONTROLLER_ID,
-                            dev_id,
-                        )
-                        .await;
-                    }
-                    Commands::Announce => {
-                        send_data_over_can(
-                            &mut can,
-                            CommandData::Announce(0),
-                            command,
-                            CONTROLLER_ID,
-                            dev_id,
-                        )
-                        .await;
-                    }
-                    Commands::Light => {
-                        info!("got remote light; stopping light show");
+                    CommandData::LightOff => {
                         LED_SIGNAL.signal(LedState::Off);
+                        None
                     }
+                    CommandData::Sensors(_, _, _) => None,
+                    CommandData::Announce(_, _) => None,
                 },
-                CommandData::Threshold(data) => {
-                    info!("Threshold: {:?}", data);
-                    // THRESHOLD
-                    let len = frame.header().len();
-                    if len >= 2 {
-                        SHARED.threshold.store(data, Ordering::Relaxed);
-                    }
-                }
-                CommandData::Moisture(_) => {
-                    error!("cant set moisture");
-                }
-                CommandData::BackoffTime(data) => {
-                    info!("BackoffTime: {:?}", data);
-                    SHARED.backoff_time.store(data, Ordering::Relaxed);
-                }
-                CommandData::WateringTime(data) => {
-                    // info!("WateringTime: {:?}", data);
-                    SHARED.watering_time.store(data, Ordering::Relaxed);
-                }
-                CommandData::Announce(_) => {
-                    info!("Received announce");
-                    if !frame.header().rtr() {
-                        // some other sensor sent a announcement with our device id.
-                        // just
-                    }
-                }
-                CommandData::Light(red, green, blue) => {
-                    // the max each color can be is 0b11111
-                    // this is due to the fact that we only transmit u16 data
-                    LED_SIGNAL.signal(LedState::Color(red, green, blue));
-                }
-                CommandData::LightRandom => {
-                    LED_SIGNAL.signal(LedState::Random);
-                }
+                CommandDataContainer::Remote { target_id: _, data } => match data {
+                    CommandData::Settings(_, _, _) => Some(CommandDataContainer::Data {
+                        target_id: CONTROLLER_ID,
+                        src_id: dev_id,
+                        data: CommandData::Settings(
+                            SHARED.threshold.load(Ordering::Relaxed),
+                            SHARED.watering_time.load(Ordering::Relaxed),
+                            SHARED.backoff_time.load(Ordering::Relaxed),
+                        ),
+                    }),
+                    CommandData::Sensors(_, _, _) => Some(CommandDataContainer::Data {
+                        target_id: CONTROLLER_ID,
+                        src_id: dev_id,
+                        data: CommandData::Sensors(
+                            Some(SHARED.moisture.load(Ordering::Relaxed)),
+                            None,
+                            None,
+                        ),
+                    }),
+                    CommandData::Light(_, _, _)
+                    | CommandData::LightRandom
+                    | CommandData::LightOff => None,
+                    CommandData::Announce(_, _) => None,
+                },
+            };
+            if let Some(to_send) = to_send {
+                send_data_over_can(&mut can, to_send).await;
+            } else {
+                info!("no response required");
             }
         }
     }
 }
-async fn send_data_over_can(
-    can: &mut Can<'_>,
-    data: CommandData,
-    command: Commands,
-    target_id: u8,
-    source_id: u8,
-) {
-    let buf = can_contract::create_data_buf(data, source_id);
-    let Some(std_id) = can_contract::id_from_command_and_dev_id(command, target_id) else {
-        error!("failed generating id");
+async fn send_data_over_can(can: &mut Can<'_>, data: CommandDataContainer) {
+    if let Some(frame) = command_data_to_frame::<can::Frame>(data) {
+        let _ = can.write(&frame).await;
+    } else {
+        error!("failed creating can frame");
         return;
-    };
-    let Ok(frame) = can::Frame::new_standard(std_id.as_raw(), &buf) else {
-        error!("failed creating frame");
-        return;
-    };
-    let _ = can.write(&frame).await;
+    }
 }
 
 async fn init_can(resourses: CanResources) -> Can<'static> {
@@ -401,10 +356,11 @@ async fn init_can(resourses: CanResources) -> Can<'static> {
     Timer::after_millis(dev_id as u64 * 100).await;
     send_data_over_can(
         &mut can,
-        CommandData::Announce(0),
-        Commands::Announce,
-        CONTROLLER_ID,
-        dev_id,
+        CommandDataContainer::Data {
+            target_id: CONTROLLER_ID,
+            src_id: dev_id,
+            data: CommandData::Announce(dev_id, SensorFlags::empty()),
+        },
     )
     .await;
     can
