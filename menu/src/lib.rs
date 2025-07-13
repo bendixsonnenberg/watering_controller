@@ -101,7 +101,7 @@ impl<T: Sensor<B> + Clone, B: Clone> MenuRunner<T, B> {
                 SensorSelection(next_sensor)
             }
             (SensorSelection(Some(sensor)), Left) => {
-                let next_sensor = sensor.clone().next(self.builder.clone());
+                let next_sensor = sensor.clone().prev(self.builder.clone());
                 if let Some(s) = next_sensor.clone() {
                     sensor.unfocus(self.builder.clone()).await;
                     s.focus(self.builder.clone()).await;
