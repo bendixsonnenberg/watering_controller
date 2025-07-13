@@ -29,7 +29,7 @@ The Specs for this Communication can be found [here](/can_protocol.md). The impl
 The moisture sensors get a threshold and use their valves to hold that threshold, currently through a simple comparision (potential PID).
 
 ## Current Status
-Two pot-sensors together with central controller, currently set up in greenhouse, with CAN-Network and watering function working as far as assessable. Menu working, displayed on LCD.
+Three pot-sensors together with central controller, currently set up in greenhouse, with CAN-Network and watering function working fairly reliable. Menu working, displayed on LCD. RGB-LEDs added for easier identification while changing thresholds. Humidity/Temperaturesensor added. All data is logged on SD-Card.
 
 ## Story and some Context
 After building a greenhouse on our little roof terrace for my fiancée, I stumbled upon the biggest problem in the private greenhouse industry. While tomatoes and cucumbers thrived, the biggest recurring problem was watering the plants, as you have to do so every day; on hot days, multiple times a day.
@@ -45,5 +45,6 @@ I'll try to update regularly – who knows, this might one day attract public in
 ## Milestones
 June '25: working menu on LCD-Display with individual IDs and live data, navigation possible through rotary encoder and "return"-button  
 June '25: data saved, showing 9 day continuous watering without crashes or similar issues; moisture level plausible
+July '25: Hardware for easier refilling added, also new water container
 ## Status History
-editing pending...
+Up to July '25: Two pot-sensors together with central controller, currently set up in greenhouse, with CAN-Network and watering function working as far as assessable. Menu working, displayed on LCD.
