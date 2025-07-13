@@ -36,6 +36,8 @@ pub trait Sensor<B>: Sized {
     fn get_backoff_time(&self) -> u16;
     fn get_watering_time(&self) -> u16;
     fn get_moisture(&self) -> u16;
+    fn get_temperature(&self) -> Option<i16>;
+    fn get_humidity(&self) -> Option<u16>;
     fn get_id(&self) -> u8;
     fn increase_threshold(self, builder: B) -> Option<Self>;
     fn decrease_threshold(self, builder: B) -> Option<Self>;
@@ -187,10 +189,12 @@ impl<T: Sensor<B> + Clone, B> Display for MenuRunner<T, B> {
             SensorSelection(Some(sensor)) => {
                 write!(
                     f,
-                    "Topf:{}Feu:{}\nMess:{}",
+                    "Topf:{}Feu:{}\nMess:{}({:?},{:?})",
                     sensor.get_id(),
                     sensor.get_threshold(),
-                    sensor.get_moisture()
+                    sensor.get_moisture(),
+                    sensor.get_temperature().unwrap_or(0),
+                    sensor.get_humidity().unwrap_or(0)
                 )
             }
             SensorSelection(None)

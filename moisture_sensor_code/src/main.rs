@@ -3,7 +3,7 @@
 
 use core::{
     fmt::Error,
-    sync::atomic::{AtomicU16, AtomicU8, Ordering},
+    sync::atomic::{AtomicBool, AtomicI16, AtomicU16, AtomicU8, Ordering},
 };
 
 use assign_resources::assign_resources;
@@ -75,12 +75,18 @@ struct SharedData {
     moisture: AtomicU16,
     watering_time: AtomicU16,
     backoff_time: AtomicU16,
+    sensor_exists: AtomicBool,
+    tempertature: AtomicI16,
+    humidity: AtomicU16,
 }
 static SHARED: SharedData = SharedData {
     threshold: AtomicU16::new(0),
     moisture: AtomicU16::new(0),
     watering_time: AtomicU16::new(30),
     backoff_time: AtomicU16::new(15),
+    sensor_exists: AtomicBool::new(false),
+    tempertature: AtomicI16::new(0),
+    humidity: AtomicU16::new(0),
 };
 static DEV_ID: AtomicU8 = AtomicU8::new(0);
 bind_interrupts!(struct Irqs {
@@ -153,7 +159,13 @@ async fn enviroment_sensors(env: EnvironmentResources) {
                 temperature,
                 relative_humidity,
             }) => {
-                info!("temp: {}, hum: {}", temperature, relative_humidity)
+                SHARED.sensor_exists.store(true, Ordering::Relaxed);
+                SHARED
+                    .humidity
+                    .store(relative_humidity as u16, Ordering::Relaxed);
+                SHARED
+                    .tempertature
+                    .store(temperature as i16, Ordering::Relaxed);
             }
             Err(e) => match (e) {
                 dht_sensor::DhtError::ChecksumMismatch => {
@@ -349,15 +361,25 @@ async fn handle_can_communication(can_resources: CanResources) {
                             SHARED.backoff_time.load(Ordering::Relaxed),
                         ),
                     }),
-                    CommandData::Sensors(_, _, _) => Some(CommandDataContainer::Data {
-                        target_id: CONTROLLER_ID,
-                        src_id: dev_id,
-                        data: CommandData::Sensors(
-                            Some(SHARED.moisture.load(Ordering::Relaxed)),
-                            None,
-                            None,
-                        ),
-                    }),
+                    CommandData::Sensors(_, _, _) => {
+                        let (temperature, humidity) =
+                            match SHARED.sensor_exists.load(Ordering::Relaxed) {
+                                true => (
+                                    Some(SHARED.tempertature.load(Ordering::Relaxed)),
+                                    Some(SHARED.humidity.load(Ordering::Relaxed)),
+                                ),
+                                false => (None, None),
+                            };
+                        Some(CommandDataContainer::Data {
+                            target_id: CONTROLLER_ID,
+                            src_id: dev_id,
+                            data: CommandData::Sensors(
+                                Some(SHARED.moisture.load(Ordering::Relaxed)),
+                                temperature,
+                                humidity,
+                            ),
+                        })
+                    }
                     CommandData::Light(_, _, _)
                     | CommandData::LightRandom
                     | CommandData::LightOff => None,

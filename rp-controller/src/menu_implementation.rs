@@ -37,6 +37,8 @@ impl SensorBuilder {
                     id: id as u8,
                     threshold: None,
                     moisture: None,
+                    temperature: None,
+                    humidity: None,
                     backoff_time: None,
                     watering_time: None,
                 });
@@ -51,7 +53,7 @@ impl SensorBuilder {
             "populating with: id: {}, threshold: {:?}",
             sensor.id, sensor.threshold
         );
-        if let CommandData::Sensors(moisture, _temp, _humidity) = get_value(
+        if let CommandData::Sensors(moisture, temp, humidity) = get_value(
             &mut self.can_tx,
             &mut self.can_rx,
             CommandData::Sensors(None, None, None),
@@ -61,6 +63,9 @@ impl SensorBuilder {
         .await?
         {
             sensor.moisture = moisture;
+            sensor.temperature = temp;
+            sensor.humidity = humidity;
+
             trace!("got moisture");
         };
         if let CommandData::Settings(threshold, backoff_time, watering_time) = get_value(
@@ -107,6 +112,8 @@ struct MenuSensor {
     id: u8,
     threshold: Option<u16>,
     moisture: Option<u16>,
+    temperature: Option<i16>,
+    humidity: Option<u16>,
     backoff_time: Option<u16>,
     watering_time: Option<u16>,
 }
@@ -158,6 +165,12 @@ impl Sensor<SensorBuilder> for MenuSensor {
     }
     fn get_moisture(&self) -> u16 {
         self.moisture.unwrap_or(0)
+    }
+    fn get_temperature(&self) -> Option<i16> {
+        self.temperature
+    }
+    fn get_humidity(&self) -> Option<u16> {
+        self.humidity
     }
     fn increase_threshold(mut self, mut _builder: SensorBuilder) -> Option<Self> {
         trace!("increase threshold");
@@ -319,7 +332,7 @@ pub async fn menu_handle(
 
     loop {
         runner.update().await;
-        let mut buffer: String<33> = String::new();
+        let mut buffer: String<128> = String::new();
         let Ok(_) = core::writeln!(&mut buffer, "{}", runner) else {
             break;
         };
