@@ -19,6 +19,8 @@ pub enum Input {
 pub enum State<T> {
     SensorsSelect,
     Errors,
+    PartyModeSelect,
+    PartyModeActive,
     SensorSelection(Option<T>),
     SensorSettingSelectionThreshold(Option<T>),
     SensorSettingSelectionBackoffTime(Option<T>),
@@ -58,7 +60,13 @@ pub struct MenuRunner<T: Sensor<B> + Clone, B> {
     builder: B,
 }
 
-impl<T: Sensor<B> + Clone, B: Clone> MenuRunner<T, B> {
+pub trait SensorBuilder {
+    #[allow(async_fn_in_trait)]
+    async fn party(self);
+    #[allow(async_fn_in_trait)]
+    async fn unparty(self);
+}
+impl<T: Sensor<B> + Clone, B: Clone + SensorBuilder> MenuRunner<T, B> {
     pub fn new(builder: B) -> Self {
         Self {
             state: State::<T>::SensorsSelect,
@@ -82,6 +90,7 @@ impl<T: Sensor<B> + Clone, B: Clone> MenuRunner<T, B> {
         use State::*;
         self.state = match (self.state.clone(), input) {
             (Errors, Left) => SensorsSelect,
+            (Errors, Right) => PartyModeSelect,
             (Errors, _) => Errors,
             (SensorsSelect, Right) => Errors,
             (SensorsSelect, Enter) => {
@@ -177,6 +186,24 @@ impl<T: Sensor<B> + Clone, B: Clone> MenuRunner<T, B> {
             }
             (SensorSettingWateringTime(sensor), Back) => SensorSettingSelectionWateringTime(sensor),
             (SensorSettingWateringTime(sensor), Enter) => SensorSettingWateringTime(sensor),
+
+            // party mode
+            (PartyModeSelect, Left) => Errors,
+            (PartyModeSelect, Right) => PartyModeSelect,
+            (PartyModeSelect, Enter) => {
+                self.builder.clone().party().await;
+                PartyModeActive
+            }
+            (PartyModeSelect, Back) => {
+                self.builder.clone().unparty().await;
+                PartyModeSelect
+            }
+
+            (PartyModeActive, Back) => {
+                self.builder.clone().unparty().await;
+                PartyModeSelect
+            }
+            (PartyModeActive, _) => PartyModeActive,
         }
     }
 }
@@ -224,6 +251,8 @@ impl<T: Sensor<B> + Clone, B> Display for MenuRunner<T, B> {
             SensorSettingSelectionBackoffTime(Some(sensor)) => {
                 write!(f, "Warte:{}min\nAuswahl", sensor.get_backoff_time())
             }
+            PartyModeSelect => write!(f, "Party aus"),
+            PartyModeActive => write!(f, "Party an"),
         }
     }
 }

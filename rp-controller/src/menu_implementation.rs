@@ -105,6 +105,36 @@ impl SensorBuilder {
         );
     }
 }
+impl menu::SensorBuilder for SensorBuilder {
+    async fn party(mut self) {
+        self.sensors.lock(|sensors| {
+            for sensor in sensors.borrow().into_iter() {
+                set_value(
+                    &mut self.can_tx,
+                    CommandDataContainer::Data {
+                        target_id: sensor as u8,
+                        src_id: 0,
+                        data: CommandData::LightRandom,
+                    },
+                );
+            }
+        })
+    }
+    async fn unparty(mut self) {
+        self.sensors.lock(|sensors| {
+            for sensor in sensors.borrow().into_iter() {
+                set_value(
+                    &mut self.can_tx,
+                    CommandDataContainer::Data {
+                        target_id: sensor as u8,
+                        src_id: 0,
+                        data: CommandData::LightOff,
+                    },
+                );
+            }
+        })
+    }
+}
 #[derive(Clone)]
 struct MenuSensor {
     #[allow(dead_code)]

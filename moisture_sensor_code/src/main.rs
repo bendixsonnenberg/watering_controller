@@ -2,6 +2,7 @@
 #![no_main]
 
 use core::{
+    char::MAX,
     fmt::Error,
     sync::atomic::{AtomicBool, AtomicI16, AtomicU16, AtomicU8, Ordering},
 };
@@ -203,8 +204,8 @@ async fn led_control(led: LedResources) {
         timer::low_level::CountingMode::EdgeAlignedUp,
     );
     let channels = pwm.split();
-    let mut blue_channel = channels.ch3;
-    let mut green_channel = channels.ch4;
+    let mut blue_channel = channels.ch4;
+    let mut green_channel = channels.ch3;
     let mut red_channel = channels.ch2;
     red_channel.set_duty_cycle_fully_off();
     green_channel.set_duty_cycle_fully_off();
@@ -214,7 +215,17 @@ async fn led_control(led: LedResources) {
     blue_channel.enable();
     let mut current_state = LedState::Off;
     const MAX: u16 = 0b11111;
-    loop {
+
+    let random_colors = [
+        (MAX, 0, 0),
+        (MAX, MAX, 0),
+        (0, MAX, 0),
+        (0, MAX, MAX),
+        (MAX / 2, 0, MAX),
+        (0, 0, MAX),
+        (MAX, 0, MAX),
+    ];
+    for color in random_colors.iter().cycle() {
         use LedState::*;
         // the timeout makes it possible for the random setting to change color regularly
         if let Ok(new_current_state) = LED_SIGNAL
@@ -236,10 +247,11 @@ async fn led_control(led: LedResources) {
                 blue_channel.set_duty_cycle_fraction(blue, MAX);
             }
             Random => {
-                let mut rng = SmallRng::seed_from_u64(Instant::now().as_ticks());
-                red_channel.set_duty_cycle_fraction(rng.random(), MAX);
-                green_channel.set_duty_cycle_fraction(rng.random(), MAX);
-                blue_channel.set_duty_cycle_fraction(rng.random(), MAX);
+                // let mut rng = SmallRng::seed_from_u64(Instant::now().as_ticks());
+                let (red, green, blue) = color;
+                red_channel.set_duty_cycle_fraction(*red, MAX);
+                green_channel.set_duty_cycle_fraction(*green, MAX);
+                blue_channel.set_duty_cycle_fraction(*blue, MAX);
             }
         }
     }
@@ -341,6 +353,7 @@ async fn handle_can_communication(can_resources: CanResources) {
                         None
                     }
                     CommandData::LightRandom => {
+                        info!("got random light");
                         LED_SIGNAL.signal(LedState::Random);
                         None
                     }
