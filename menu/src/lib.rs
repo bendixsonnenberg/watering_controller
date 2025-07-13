@@ -45,6 +45,10 @@ pub trait Sensor<B>: Sized {
     fn decrease_watering_time(self, builder: B) -> Option<Self>;
     #[allow(async_fn_in_trait)]
     async fn populate(self, builder: B) -> Option<Self>;
+    #[allow(async_fn_in_trait)]
+    async fn focus(self, builder: B);
+    #[allow(async_fn_in_trait)]
+    async fn unfocus(self, builder: B);
 }
 
 pub struct MenuRunner<T: Sensor<B> + Clone, B> {
@@ -78,16 +82,37 @@ impl<T: Sensor<B> + Clone, B: Clone> MenuRunner<T, B> {
             (Errors, Left) => SensorsSelect,
             (Errors, _) => Errors,
             (SensorsSelect, Right) => Errors,
-            (SensorsSelect, Enter) => SensorSelection(Sensor::first(self.builder.clone())),
+            (SensorsSelect, Enter) => {
+                let sensor: Option<T> = Sensor::first(self.builder.clone());
+                if let Some(s) = sensor.clone() {
+                    s.focus(self.builder.clone()).await;
+                }
+                SensorSelection(sensor)
+            }
             (SensorsSelect, _) => SensorsSelect,
             (SensorSelection(Some(sensor)), Right) => {
-                SensorSelection(sensor.next(self.builder.clone()))
+                let next_sensor = sensor.clone().next(self.builder.clone());
+                if let Some(s) = next_sensor.clone() {
+                    sensor.unfocus(self.builder.clone()).await;
+                    s.focus(self.builder.clone()).await;
+                }
+                SensorSelection(next_sensor)
             }
             (SensorSelection(Some(sensor)), Left) => {
-                SensorSelection(sensor.prev(self.builder.clone()))
+                let next_sensor = sensor.clone().next(self.builder.clone());
+                if let Some(s) = next_sensor.clone() {
+                    sensor.unfocus(self.builder.clone()).await;
+                    s.focus(self.builder.clone()).await;
+                }
+
+                SensorSelection(next_sensor)
             }
             (SensorSelection(None), Left | Right) => SensorSelection(None),
-            (SensorSelection(_), Back) => SensorsSelect,
+            (SensorSelection(None), Back) => SensorsSelect,
+            (SensorSelection(Some(sensor)), Back) => {
+                sensor.unfocus(self.builder.clone()).await;
+                SensorsSelect
+            }
             // selection of the possible settings
             (SensorSelection(sensor), Enter) => SensorSettingSelectionThreshold(sensor),
 

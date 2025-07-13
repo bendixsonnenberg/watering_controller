@@ -1,7 +1,10 @@
 #![no_std]
 #![no_main]
 
-use core::sync::atomic::{AtomicU16, AtomicU8, Ordering};
+use core::{
+    fmt::Error,
+    sync::atomic::{AtomicU16, AtomicU8, Ordering},
+};
 
 use assign_resources::assign_resources;
 use can::{
@@ -10,21 +13,26 @@ use can::{
 };
 use can_contract::*;
 use defmt::*;
+use dht_sensor::DhtReading;
 use embassy_executor::Spawner;
 
 use embassy_stm32::{
     gpio::{AnyPin, Input},
     interrupt::InterruptExt,
+    timer::simple_pwm::{PwmPin, SimplePwm},
 };
 use embassy_stm32::{rcc::Sysclk, time::Hertz, *};
-use embassy_time::{Duration, Instant, Timer};
+use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, signal::Signal};
+use embassy_time::{Delay, Duration, Instant, Timer, WithTimeout};
 use gpio::{Level, Output, Speed};
+use rand::{rngs::SmallRng, Rng, SeedableRng};
 
 use {defmt_rtt as _, panic_probe as _};
 // define constants
 const CAN_BITRATE: u32 = 125_000; // bitrate for can bus. We are not transfering large amounts of
                                   // data ,so lets keep this low
 const CONTROLLER_ID: u8 = 0;
+static LED_SIGNAL: Signal<CriticalSectionRawMutex, LedState> = Signal::new();
 
 assign_resources! {
     valve_control: ValveResources {
@@ -47,6 +55,18 @@ assign_resources! {
         b6: PA5,
         b7: PA4,
 
+    }
+    // the led pins and timer have to be together, it is impossible to do something forbidden here, since rustc will not compile
+    led_pins: LedResources {
+        timer: TIM2,
+        red: PA2,
+        green: PA1,
+        blue: PA3,
+    }
+
+    // dht11
+    enviroment_sensor_pins: EnvironmentResources {
+        open_drain: PB12,
     }
 }
 #[derive(Default)]
@@ -99,11 +119,9 @@ async fn main(_spawner: Spawner) {
             r.b7.into(),
         ];
         for pin in pins {
-            info!("dev_id:{}", dev_id);
             dev_id *= 2;
             let input = Input::new(pin, pull);
             if input.is_low() {
-                info!("is high");
                 dev_id += 1;
             }
         }
@@ -118,11 +136,101 @@ async fn main(_spawner: Spawner) {
     // setup relay
     _spawner.spawn(handle_valve(r.valve_control)).unwrap();
     _spawner
-        .spawn(handle_modify_threshold(r.can_control))
+        .spawn(handle_can_communication(r.can_control))
         .unwrap();
-
-    //
-    // create spi device
+    _spawner.spawn(led_control(r.led_pins)).unwrap();
+    _spawner
+        .spawn(enviroment_sensors(r.enviroment_sensor_pins))
+        .unwrap();
+}
+#[embassy_executor::task]
+async fn enviroment_sensors(env: EnvironmentResources) {
+    let mut dht_pin = gpio::OutputOpenDrain::new(env.open_drain, Level::High, Speed::VeryHigh);
+    Timer::after_millis(1000).await;
+    loop {
+        match dht_sensor::dht11::Reading::read(&mut embassy_time::Delay, &mut dht_pin) {
+            Ok(dht_sensor::dht11::Reading {
+                temperature,
+                relative_humidity,
+            }) => {
+                info!("temp: {}, hum: {}", temperature, relative_humidity)
+            }
+            Err(e) => match (e) {
+                dht_sensor::DhtError::ChecksumMismatch => {
+                    error!("checksum error")
+                }
+                dht_sensor::DhtError::Timeout => {
+                    error!("timeout")
+                }
+                dht_sensor::DhtError::PinError(e) => {
+                    error!("pin error{:?}", e)
+                }
+            },
+        }
+        Timer::after_secs(1).await;
+    }
+}
+enum LedState {
+    Color(u16, u16, u16),
+    Random,
+    Off,
+}
+#[embassy_executor::task]
+async fn led_control(led: LedResources) {
+    let led_pins = led;
+    let red_pwm_pin = PwmPin::new_ch3(led_pins.red, gpio::OutputType::PushPull);
+    let green_pwm_pin = PwmPin::new_ch2(led_pins.green, gpio::OutputType::PushPull);
+    let blue_pwm_pin = PwmPin::new_ch4(led_pins.blue, gpio::OutputType::PushPull);
+    let pwm = SimplePwm::new(
+        led_pins.timer,
+        None,
+        Some(green_pwm_pin),
+        Some(red_pwm_pin),
+        Some(blue_pwm_pin),
+        Hertz(50_000),
+        timer::low_level::CountingMode::EdgeAlignedUp,
+    );
+    let channels = pwm.split();
+    let mut blue_channel = channels.ch3;
+    let mut green_channel = channels.ch4;
+    let mut red_channel = channels.ch2;
+    red_channel.set_duty_cycle_fully_off();
+    green_channel.set_duty_cycle_fully_off();
+    blue_channel.set_duty_cycle_fully_off();
+    red_channel.enable();
+    green_channel.enable();
+    blue_channel.enable();
+    let mut current_state = LedState::Off;
+    const MAX: u16 = 0b11111;
+    loop {
+        use LedState::*;
+        // the timeout makes it possible for the random setting to change color regularly
+        if let Ok(new_current_state) = LED_SIGNAL
+            .wait()
+            .with_timeout(Duration::from_millis(250))
+            .await
+        {
+            current_state = new_current_state;
+        };
+        match current_state {
+            Off => {
+                red_channel.set_duty_cycle_fully_off();
+                green_channel.set_duty_cycle_fully_off();
+                blue_channel.set_duty_cycle_fully_off();
+            }
+            Color(red, green, blue) => {
+                red_channel.set_duty_cycle_fraction(red, MAX);
+                green_channel.set_duty_cycle_fraction(green, MAX);
+                blue_channel.set_duty_cycle_fraction(blue, MAX);
+            }
+            Random => {
+                let mut rng = SmallRng::seed_from_u64(Instant::now().as_ticks());
+                red_channel.set_duty_cycle_fraction(rng.random(), MAX);
+                green_channel.set_duty_cycle_fraction(rng.random(), MAX);
+                blue_channel.set_duty_cycle_fraction(rng.random(), MAX);
+            }
+        }
+    }
 }
 
 #[embassy_executor::task]
@@ -182,7 +290,7 @@ async fn handle_valve(resources: ValveResources) {
 }
 
 #[embassy_executor::task]
-async fn handle_modify_threshold(can_resources: CanResources) {
+async fn handle_can_communication(can_resources: CanResources) {
     let mut can = init_can(can_resources).await;
     trace!("can initiated");
 
@@ -199,112 +307,78 @@ async fn handle_modify_threshold(can_resources: CanResources) {
         if let Ok(env) = res {
             let frame = env.frame;
             trace!("frame received: {:?}", env);
-            let Some((command, _, data)) = frame_to_command_data(frame) else {
+            let Some(container) = frame_to_command_data(frame) else {
                 // ignore
                 // device id, has to be the id of this device anyways
                 continue;
             };
-            match command {
-                Commands::Threshold => {
-                    info!("Threshold: {:?}", data);
-                    // THRESHOLD
-                    if frame.header().rtr() {
-                        // send data
-                        send_data_over_can(
-                            &mut can,
+            let to_send = match container {
+                CommandDataContainer::Data {
+                    target_id: _,
+                    src_id: _,
+                    data,
+                } => match data {
+                    CommandData::Settings(threshold, backoff_time, watering_time) => {
+                        SHARED.threshold.store(threshold, Ordering::Relaxed);
+                        SHARED.backoff_time.store(backoff_time, Ordering::Relaxed);
+                        SHARED.watering_time.store(watering_time, Ordering::Relaxed);
+                        None
+                    }
+                    CommandData::Light(red, green, blue) => {
+                        LED_SIGNAL.signal(LedState::Color(red, green, blue));
+                        None
+                    }
+                    CommandData::LightRandom => {
+                        LED_SIGNAL.signal(LedState::Random);
+                        None
+                    }
+                    CommandData::LightOff => {
+                        LED_SIGNAL.signal(LedState::Off);
+                        None
+                    }
+                    CommandData::Sensors(_, _, _) => None,
+                    CommandData::Announce(_, _) => None,
+                },
+                CommandDataContainer::Remote { target_id: _, data } => match data {
+                    CommandData::Settings(_, _, _) => Some(CommandDataContainer::Data {
+                        target_id: CONTROLLER_ID,
+                        src_id: dev_id,
+                        data: CommandData::Settings(
                             SHARED.threshold.load(Ordering::Relaxed),
-                            command,
-                            CONTROLLER_ID,
-                            dev_id,
-                        )
-                        .await;
-                    } else {
-                        let len = frame.header().len();
-                        if len >= 2 {
-                            let new_threshold = data.expect("not rtr, should exists");
-                            SHARED.threshold.store(new_threshold, Ordering::Relaxed);
-                        }
-                    }
-                }
-                Commands::Moisture => {
-                    info!("Moisture: {:?}", data);
-                    // moisture
-                    if frame.header().rtr() {
-                        // send data
-                        send_data_over_can(
-                            &mut can,
-                            SHARED.moisture.load(Ordering::Relaxed),
-                            command,
-                            CONTROLLER_ID,
-                            dev_id,
-                        )
-                        .await;
-                    }
-                }
-                Commands::BackoffTime => {
-                    info!("BackoffTime: {:?}", data);
-                    if !frame.header().rtr() {
-                        SHARED
-                            .backoff_time
-                            .store(data.expect("not rtr should exists"), Ordering::Relaxed);
-                    } else {
-                        send_data_over_can(
-                            &mut can,
-                            SHARED.backoff_time.load(Ordering::Relaxed),
-                            command,
-                            CONTROLLER_ID,
-                            dev_id,
-                        )
-                        .await;
-                    }
-                }
-                Commands::WateringTime => {
-                    info!("WateringTime: {:?}", data);
-                    if !frame.header().rtr() {
-                        SHARED
-                            .watering_time
-                            .store(data.expect("not rtr should exists"), Ordering::Relaxed);
-                    } else {
-                        send_data_over_can(
-                            &mut can,
                             SHARED.watering_time.load(Ordering::Relaxed),
-                            command,
-                            CONTROLLER_ID,
-                            dev_id,
-                        )
-                        .await;
-                    }
-                }
-                Commands::Announce => {
-                    info!("Received announce");
-                    if !frame.header().rtr() {
-                        // some other sensor sent a announcement with our device id.
-                        // just
-                    } else {
-                        send_data_over_can(&mut can, 0, command, CONTROLLER_ID, dev_id).await;
-                    }
-                }
+                            SHARED.backoff_time.load(Ordering::Relaxed),
+                        ),
+                    }),
+                    CommandData::Sensors(_, _, _) => Some(CommandDataContainer::Data {
+                        target_id: CONTROLLER_ID,
+                        src_id: dev_id,
+                        data: CommandData::Sensors(
+                            Some(SHARED.moisture.load(Ordering::Relaxed)),
+                            None,
+                            None,
+                        ),
+                    }),
+                    CommandData::Light(_, _, _)
+                    | CommandData::LightRandom
+                    | CommandData::LightOff => None,
+                    CommandData::Announce(_, _) => None,
+                },
+            };
+            if let Some(to_send) = to_send {
+                send_data_over_can(&mut can, to_send).await;
+            } else {
+                info!("no response required");
             }
         }
     }
 }
-async fn send_data_over_can(
-    can: &mut Can<'_>,
-    data: u16,
-    command: Commands,
-    target_id: u8,
-    source_id: u8,
-) {
-    let buf = can_contract::create_data_buf(data, source_id);
-    let Some(std_id) = can_contract::id_from_command_and_dev_id(command, target_id) else {
-        error!("failed generating id");
+async fn send_data_over_can(can: &mut Can<'_>, data: CommandDataContainer) {
+    if let Some(frame) = command_data_to_frame::<can::Frame>(data) {
+        let _ = can.write(&frame).await;
+    } else {
+        error!("failed creating can frame");
         return;
-    };
-    let Ok(frame) = can::Frame::new_standard(std_id.as_raw(), &buf) else {
-        error!("failed creating frame");
-        return;
-    };
-    let _ = can.write(&frame).await;
+    }
 }
 
 async fn init_can(resourses: CanResources) -> Can<'static> {
@@ -331,7 +405,15 @@ async fn init_can(resourses: CanResources) -> Can<'static> {
     info!("enabeling can");
     can.enable().await;
     info!("sending announcement");
-    Timer::after_millis(dev_id as u64 * 100).await;
-    send_data_over_can(&mut can, 0, Commands::Announce, CONTROLLER_ID, dev_id).await;
+    Timer::after_millis((dev_id as u64 * 100) + 4000).await;
+    send_data_over_can(
+        &mut can,
+        CommandDataContainer::Data {
+            target_id: CONTROLLER_ID,
+            src_id: dev_id,
+            data: CommandData::Announce(dev_id, SensorFlags::empty()),
+        },
+    )
+    .await;
     can
 }

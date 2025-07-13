@@ -1,9 +1,12 @@
 use crate::SHARED_SETTINGS;
 use crate::SensorBitmap;
 use crate::SpiCan;
-use can_contract::{Commands, DevId, frame_to_command_data, get_filter_from_id};
+use can_contract::CommandDataContainer;
+use can_contract::{CommandData, DevId, frame_to_command_data, get_filter_from_id};
+use core::any::Any;
 use core::cell::RefCell;
 use core::panic;
+use core::sync::atomic::Ordering;
 use embassy_futures::select;
 use embassy_rp::gpio::{Input, Level, Output};
 use embassy_rp::peripherals::SPI0;
@@ -13,9 +16,7 @@ use embassy_sync::blocking_mutex::NoopMutex;
 use embassy_sync::blocking_mutex::raw::{NoopRawMutex, ThreadModeRawMutex};
 use embassy_sync::channel::TrySendError;
 use embassy_time::{Delay, Duration, Timer, WithTimeout};
-use embedded_can::Frame;
 use log::*;
-use mcp2515::frame::CanFrame;
 use mcp2515::*;
 use static_cell::StaticCell;
 
@@ -31,12 +32,7 @@ type CanBus = MCP2515<
         Output<'static>,
     >,
 >;
-type CanChannelData = (Commands, can_contract::DevId, CanPayload);
-#[derive(Debug)]
-pub enum CanPayload {
-    Remote,
-    Data(can_contract::CanData),
-}
+type CanChannelData = CommandDataContainer;
 pub type CanChannel =
     embassy_sync::channel::Channel<ThreadModeRawMutex, CanChannelData, CHANNEL_SIZE>;
 pub type CanSender =
@@ -44,37 +40,20 @@ pub type CanSender =
 pub type CanReceiver =
     embassy_sync::channel::Receiver<'static, ThreadModeRawMutex, CanChannelData, CHANNEL_SIZE>;
 /// sends settings to the given channel. May fail at sending if the channel is full
-fn send_settings_to_sensor(
+fn send_default_settings_to_sensor(
     dev_id: can_contract::DevId,
     channel: CanSender,
-) -> Result<(), TrySendError<(Commands, can_contract::DevId, CanPayload)>> {
-    channel.try_send((
-        Commands::Threshold,
-        dev_id,
-        CanPayload::Data(
-            SHARED_SETTINGS
-                .threshold
-                .load(core::sync::atomic::Ordering::Relaxed),
+) -> Result<(), TrySendError<CommandDataContainer>> {
+    channel.try_send(CommandDataContainer::Data {
+        target_id: dev_id,
+        src_id: CONTROLLER_DEV_ID,
+        data: CommandData::Settings(
+            SHARED_SETTINGS.threshold.load(Ordering::Relaxed),
+            SHARED_SETTINGS.watering_time.load(Ordering::Relaxed),
+            SHARED_SETTINGS.backoff_time.load(Ordering::Relaxed),
         ),
-    ))?;
-    channel.try_send((
-        Commands::WateringTime,
-        dev_id,
-        CanPayload::Data(
-            SHARED_SETTINGS
-                .watering_time
-                .load(core::sync::atomic::Ordering::Relaxed),
-        ),
-    ))?;
-    channel.try_send((
-        Commands::BackoffTime,
-        dev_id,
-        CanPayload::Data(
-            SHARED_SETTINGS
-                .backoff_time
-                .load(core::sync::atomic::Ordering::Relaxed),
-        ),
-    ))
+    })?;
+    Ok(())
 }
 /// handles all the can related stuff, mainly sending messages and routing incoming messages to the
 /// correct receiver
@@ -138,62 +117,59 @@ pub async fn can_task(
                 };
                 info!("{:?}", frame);
                 match frame {
-                    (Commands::Announce, Some(dev_id), _) => sensors.lock(|sensors| {
-                        // info!("got announcment fomr {}", dev_id);
-                        // tell everyone that this sensor is connected
-                        let mut s = sensors.borrow_mut();
-                        s.set(dev_id as usize, true);
-                        // info!("{:?}", s.first_index());
-                        // tell the new sensor what the settings are
+                    CommandDataContainer::Data {
+                        target_id: _,
+                        src_id: _src_id,
+                        data,
+                    } => {
+                        match data {
+                            CommandData::Announce(dev_id, _) => {
+                                sensors.lock(|sensors| {
+                                    // info!("got announcment fomr {}", dev_id);
+                                    // tell everyone that this sensor is connected
+                                    let mut s = sensors.borrow_mut();
+                                    s.set(dev_id as usize, true);
+                                    // info!("{:?}", s.first_index());
+                                    // tell the new sensor what the settings are
 
-                        let _ = send_settings_to_sensor(dev_id, self_send);
-                    }),
-                    (command, Some(dev_id), Some(data)) => {
-                        // use try send here to avoid blocking the task from interacting with the
-                        // can
-                        let r = receive_channel.try_send((command, dev_id, CanPayload::Data(data)));
-                        match r {
-                            Ok(_) => {}
-                            Err(e) => {
-                                info!("{:?}", e);
+                                    let _ = send_default_settings_to_sensor(dev_id, self_send);
+                                });
+                            }
+                            CommandData::Settings(_, _, _) => {
+                                let _res = receive_channel.try_send(frame);
+                            }
+                            CommandData::Light(_, _, _)
+                            | CommandData::LightRandom
+                            | CommandData::LightOff => {}
+                            CommandData::Sensors(_, _, _) => {
+                                let _res = receive_channel.try_send(frame);
                             }
                         }
                     }
-                    (_command, Some(_dev_id), None) => {
-                        info!("received remote frame, need to handle it")
+                    CommandDataContainer::Remote {
+                        target_id: _,
+                        data: _,
+                    } => { // the sensors should not ask anything
                     }
-                    (_, _, _) => continue,
                 }
             }
             // transmit this message
-            select::Either::Second((command, dev_id, data)) => {
+            select::Either::Second(frame) => {
                 // we have a free tx buffer and we have got a message, so we should not encounter
                 // tx busy
-                info!(
-                    "sending can frame with: {:?}, id: {} data: {:?}",
-                    command, dev_id, data
-                );
-                let Some(id) = can_contract::id_from_command_and_dev_id(command, dev_id) else {
+                info!("sending can frame with: {:?}", frame);
+
+                if let Some(frame) = can_contract::command_data_to_frame(frame) {
+                    match can.send_message(frame) {
+                        Ok(_) => {
+                            info!("sent can message");
+                        }
+                        Err(e) => {
+                            info!("{:?}", e);
+                        }
+                    }
+                } else {
                     continue;
-                };
-
-                let frame = match data {
-                    CanPayload::Remote => CanFrame::new_remote(id, can_contract::DLC),
-
-                    CanPayload::Data(data) => {
-                        let buf = can_contract::create_data_buf(data, CONTROLLER_DEV_ID);
-                        CanFrame::new(id, &buf)
-                    }
-                };
-                let Some(frame) = frame else { continue };
-
-                match can.send_message(frame) {
-                    Ok(_) => {
-                        info!("sent can message");
-                    }
-                    Err(e) => {
-                        info!("{:?}", e);
-                    }
                 }
             }
         }
@@ -201,29 +177,33 @@ pub async fn can_task(
 }
 
 // can set and get values
-pub fn set_value(
-    can_tx: &mut CanSender,
-    command: Commands,
-    data: can_contract::CanData,
-    dev_id: can_contract::DevId,
-) {
-    if let Err(e) = can_tx.try_send((command, dev_id, CanPayload::Data(data))) {
-        error!(
-            "failed setting value for {:?}, dev_id {}, data {}, {:?}",
-            command, dev_id, data, e
-        );
+pub fn set_value(can_tx: &mut CanSender, command_data: CommandDataContainer) {
+    if let Err(e) = can_tx.try_send(command_data) {
+        error!("failed setting value for {:?},  {:?}", command_data, e);
     };
 }
+/// sends a remote frame to request data, waits for a response(timeout 500ms) and interprets it
+/// command is only relevant for selecting what data is requestet, most likely sensors or settings
+/// the content of the enum will be discarded
 pub async fn get_value(
     can_tx: &mut CanSender,
     can_rx: &mut CanReceiver,
-    command: Commands,
+    command: CommandData,
     dev_id: u8,
     sensors: &SensorBitmap,
-) -> Option<can_contract::CanData> {
-    can_tx.send((command, dev_id, CanPayload::Remote)).await;
+) -> Option<can_contract::CommandData> {
+    can_tx
+        .send(CommandDataContainer::Remote {
+            target_id: dev_id,
+            data: command,
+        })
+        .await;
 
-    let Ok((r_command, r_source_id, CanPayload::Data(r_data))) = can_rx
+    let Ok(CommandDataContainer::Data {
+        target_id: _,
+        src_id,
+        data,
+    }) = can_rx
         .receive()
         .with_timeout(Duration::from_millis(500))
         .await
@@ -234,8 +214,9 @@ pub async fn get_value(
         return None;
     };
 
-    if r_command == command && r_source_id == dev_id {
-        return Some(r_data);
+    //TODO check if type_id does what i want, i want to check if the enum type is the same
+    if src_id == dev_id && command.type_id() == data.type_id() {
+        return Some(data);
     }
     None
 }

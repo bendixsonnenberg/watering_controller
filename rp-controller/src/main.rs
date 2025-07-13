@@ -13,11 +13,9 @@ use core::sync::atomic::AtomicU16;
 use assign_resources::*;
 use bitmaps::Bitmap;
 use can::CanChannel;
-use can::CanPayload;
 use can::CanSender;
 use can::can_task;
 use can::init_can;
-use can_contract::*;
 use cyw43_pio::{DEFAULT_CLOCK_DIVIDER, PioSpi};
 use defmt::unwrap;
 use embassy_executor::Spawner;
@@ -209,14 +207,14 @@ async fn main(spawner: Spawner) {
     }
 }
 
-#[embassy_executor::task]
-async fn poll_sensors(can_tx: CanSender) {
-    for i in 1..DevId::MAX {
-        // id 0 is the controller
-        // ask every id if it exists
-        info!("polling: {}", i);
-        can_tx
-            .send((Commands::Announce, i, CanPayload::Remote))
-            .await;
-    }
-}
+// #[embassy_executor::task]
+// async fn poll_sensors(can_tx: CanSender) {
+//     for i in 1..DevId::MAX {
+//         // id 0 is the controller
+//         // ask every id if it exists
+//         info!("polling: {}", i);
+//         can_tx
+//             .send((Commands::Announce, i, can_contract::CommandData::Remote))
+//             .await;
+//     }
+// }
