@@ -108,7 +108,11 @@ impl<T: Sensor<B> + Clone, B: Clone> MenuRunner<T, B> {
                 SensorSelection(next_sensor)
             }
             (SensorSelection(None), Left | Right) => SensorSelection(None),
-            (SensorSelection(_), Back) => SensorsSelect,
+            (SensorSelection(None), Back) => SensorsSelect,
+            (SensorSelection(Some(sensor)), Back) => {
+                sensor.unfocus(self.builder.clone()).await;
+                SensorsSelect
+            }
             // selection of the possible settings
             (SensorSelection(sensor), Enter) => SensorSettingSelectionThreshold(sensor),
 

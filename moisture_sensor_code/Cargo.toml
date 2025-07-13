@@ -34,6 +34,7 @@ can_contract = {version = "*", path="../can_contract"}
 embedded-can = "0.4.1"
 stm32-metapac = { version = "16.0.0", features = ["defmt", "stm32f103c8"] }
 rand = { version = "0.9.1", default-features = false, features = ["small_rng"] }
+dht-sensor = "0.2.1"
 [profile.dev]
 opt-level = "s" 
 [profile.release]

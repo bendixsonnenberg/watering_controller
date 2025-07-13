@@ -1,7 +1,10 @@
 #![no_std]
 #![no_main]
 
-use core::sync::atomic::{AtomicU16, AtomicU8, Ordering};
+use core::{
+    fmt::Error,
+    sync::atomic::{AtomicU16, AtomicU8, Ordering},
+};
 
 use assign_resources::assign_resources;
 use can::{
@@ -10,6 +13,7 @@ use can::{
 };
 use can_contract::*;
 use defmt::*;
+use dht_sensor::DhtReading;
 use embassy_executor::Spawner;
 
 use embassy_stm32::{
@@ -19,7 +23,7 @@ use embassy_stm32::{
 };
 use embassy_stm32::{rcc::Sysclk, time::Hertz, *};
 use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, signal::Signal};
-use embassy_time::{Duration, Instant, Timer, WithTimeout};
+use embassy_time::{Delay, Duration, Instant, Timer, WithTimeout};
 use gpio::{Level, Output, Speed};
 use rand::{rngs::SmallRng, Rng, SeedableRng};
 
@@ -55,9 +59,14 @@ assign_resources! {
     // the led pins and timer have to be together, it is impossible to do something forbidden here, since rustc will not compile
     led_pins: LedResources {
         timer: TIM2,
-        red: PA3,
-        green: PA2,
-        blue: PA1,
+        red: PA2,
+        green: PA1,
+        blue: PA3,
+    }
+
+    // dht11
+    enviroment_sensor_pins: EnvironmentResources {
+        open_drain: PB12,
     }
 }
 #[derive(Default)]
@@ -110,11 +119,9 @@ async fn main(_spawner: Spawner) {
             r.b7.into(),
         ];
         for pin in pins {
-            info!("dev_id:{}", dev_id);
             dev_id *= 2;
             let input = Input::new(pin, pull);
             if input.is_low() {
-                info!("is high");
                 dev_id += 1;
             }
         }
@@ -132,8 +139,36 @@ async fn main(_spawner: Spawner) {
         .spawn(handle_can_communication(r.can_control))
         .unwrap();
     _spawner.spawn(led_control(r.led_pins)).unwrap();
-    //
-    // create spi device
+    _spawner
+        .spawn(enviroment_sensors(r.enviroment_sensor_pins))
+        .unwrap();
+}
+#[embassy_executor::task]
+async fn enviroment_sensors(env: EnvironmentResources) {
+    let mut dht_pin = gpio::OutputOpenDrain::new(env.open_drain, Level::High, Speed::VeryHigh);
+    Timer::after_millis(1000).await;
+    loop {
+        match dht_sensor::dht11::Reading::read(&mut embassy_time::Delay, &mut dht_pin) {
+            Ok(dht_sensor::dht11::Reading {
+                temperature,
+                relative_humidity,
+            }) => {
+                info!("temp: {}, hum: {}", temperature, relative_humidity)
+            }
+            Err(e) => match (e) {
+                dht_sensor::DhtError::ChecksumMismatch => {
+                    error!("checksum error")
+                }
+                dht_sensor::DhtError::Timeout => {
+                    error!("timeout")
+                }
+                dht_sensor::DhtError::PinError(e) => {
+                    error!("pin error{:?}", e)
+                }
+            },
+        }
+        Timer::after_secs(1).await;
+    }
 }
 enum LedState {
     Color(u16, u16, u16),
@@ -143,22 +178,22 @@ enum LedState {
 #[embassy_executor::task]
 async fn led_control(led: LedResources) {
     let led_pins = led;
-    let red_pwm_pin = PwmPin::new_ch4(led_pins.red, gpio::OutputType::PushPull);
-    let green_pwm_pin = PwmPin::new_ch3(led_pins.green, gpio::OutputType::PushPull);
-    let blue_pwm_pin = PwmPin::new_ch2(led_pins.blue, gpio::OutputType::PushPull);
+    let red_pwm_pin = PwmPin::new_ch3(led_pins.red, gpio::OutputType::PushPull);
+    let green_pwm_pin = PwmPin::new_ch2(led_pins.green, gpio::OutputType::PushPull);
+    let blue_pwm_pin = PwmPin::new_ch4(led_pins.blue, gpio::OutputType::PushPull);
     let pwm = SimplePwm::new(
         led_pins.timer,
         None,
-        Some(blue_pwm_pin),
         Some(green_pwm_pin),
         Some(red_pwm_pin),
+        Some(blue_pwm_pin),
         Hertz(50_000),
         timer::low_level::CountingMode::EdgeAlignedUp,
     );
     let channels = pwm.split();
-    let mut blue_channel = channels.ch2;
-    let mut green_channel = channels.ch3;
-    let mut red_channel = channels.ch4;
+    let mut blue_channel = channels.ch3;
+    let mut green_channel = channels.ch4;
+    let mut red_channel = channels.ch2;
     red_channel.set_duty_cycle_fully_off();
     green_channel.set_duty_cycle_fully_off();
     blue_channel.set_duty_cycle_fully_off();
@@ -370,7 +405,7 @@ async fn init_can(resourses: CanResources) -> Can<'static> {
     info!("enabeling can");
     can.enable().await;
     info!("sending announcement");
-    Timer::after_millis(dev_id as u64 * 100).await;
+    Timer::after_millis((dev_id as u64 * 100) + 4000).await;
     send_data_over_can(
         &mut can,
         CommandDataContainer::Data {
