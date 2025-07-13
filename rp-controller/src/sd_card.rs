@@ -89,10 +89,10 @@ pub async fn sd_card_log(
             let mut failed = false;
             {
                 let sensors_map = sensors.lock(|sensor| sensor.borrow().clone());
-                let mut buffer: String<64> = String::new();
+                let mut buffer: String<128> = String::new();
                 for sensor in sensors_map.into_iter() {
                     let id = sensor as u8;
-                    let Some(CommandData::Sensors(Some(moisture), _temp, _humidity)) = get_value(
+                    let Some(CommandData::Sensors(Some(moisture), temp, humidity)) = get_value(
                         &mut can_tx,
                         &mut can_rx,
                         CommandData::Sensors(None, None, None),
@@ -125,6 +125,12 @@ pub async fn sd_card_log(
                         failed = true;
                         break;
                     };
+                    // if the sensor has temp and humidity print them to sd card
+                    if let Some(temp) = temp {
+                        if let Some(hum) = humidity {
+                            let _ = core::write!(&mut buffer, "Temp: {}, Hum: {}", temp, hum);
+                        }
+                    }
                     let Ok(_) = log_file.write(buffer.as_bytes()) else {
                         failed = true;
                         break;
