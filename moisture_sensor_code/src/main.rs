@@ -370,8 +370,8 @@ async fn handle_can_communication(can_resources: CanResources) {
                         src_id: dev_id,
                         data: CommandData::Settings(
                             SHARED.threshold.load(Ordering::Relaxed),
-                            SHARED.watering_time.load(Ordering::Relaxed),
                             SHARED.backoff_time.load(Ordering::Relaxed),
+                            SHARED.watering_time.load(Ordering::Relaxed),
                         ),
                     }),
                     CommandData::Sensors(_, _, _) => {
