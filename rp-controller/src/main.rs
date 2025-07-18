@@ -7,6 +7,7 @@
 mod can;
 mod menu_implementation;
 mod sd_card;
+mod settings;
 use core::cell::RefCell;
 use core::sync::atomic::AtomicU16;
 
@@ -205,6 +206,11 @@ async fn main(spawner: Spawner) {
         control.gpio_set(0, false).await;
         Timer::after(delay).await;
     }
+}
+
+#[embassy_executor::task]
+async fn net_task(mut runner: embassy_net::Runner<'static, cyw43::NetDriver<'static>>) -> ! {
+    runner.run().await
 }
 
 // #[embassy_executor::task]

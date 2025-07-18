@@ -1,5 +1,6 @@
 use crate::can::{CanReceiver, get_value};
-use crate::{CanSender, SensorBitmap, SpiSdcard};
+use crate::settings::read_settings;
+use crate::{CanSender, SensorBitmap, SpiSdcard, settings};
 use can_contract::CommandData;
 use core::fmt::Write;
 use embassy_rp::gpio::{Level, Output};
@@ -63,6 +64,12 @@ pub async fn sd_card_log(
             continue;
         };
         info!("got dir");
+
+        if let Ok(mut settings_file) =
+            root_dir.open_file_in_dir("settings", embedded_sdmmc::Mode::ReadOnly)
+        {
+            read_settings(settings_file).await;
+        }
 
         let Ok(mut log_file) = root_dir.open_file_in_dir(
             "log_file.csv",
