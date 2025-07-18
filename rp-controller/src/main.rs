@@ -30,6 +30,7 @@ use embassy_rp::usb::Driver;
 use embassy_sync::blocking_mutex::raw::ThreadModeRawMutex;
 use embassy_time::{Duration, Timer};
 use log::*;
+use net::net_task;
 use static_cell::StaticCell;
 use {defmt_rtt as _, panic_probe as _};
 
@@ -146,7 +147,7 @@ async fn main(spawner: Spawner) {
 
     static STATE: StaticCell<cyw43::State> = StaticCell::new();
     let state = STATE.init(cyw43::State::new());
-    let (_net_device, mut control, runner) = cyw43::new(state, pwr, spi, fw).await;
+    let (net_device, mut control, runner) = cyw43::new(state, pwr, spi, fw).await;
     // setting up usb logging
     let driver = Driver::new(p.USB, Irqs);
     unwrap!(spawner.spawn(cyw43_task(runner)));
@@ -199,19 +200,16 @@ async fn main(spawner: Spawner) {
         r.spi_sdcard
     )));
 
+    unwrap!(spawner.spawn(crate::net::server(
+        control,
+        net_device,
+        spawner,
+        can_send_tx,
+        can_receive_rx,
+        sensors
+    )));
+
     let delay = Duration::from_millis(250);
-    loop {
-        control.gpio_set(0, true).await;
-        Timer::after(delay).await;
-
-        control.gpio_set(0, false).await;
-        Timer::after(delay).await;
-    }
-}
-
-#[embassy_executor::task]
-async fn net_task(mut runner: embassy_net::Runner<'static, cyw43::NetDriver<'static>>) -> ! {
-    runner.run().await
 }
 
 // #[embassy_executor::task]

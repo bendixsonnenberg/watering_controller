@@ -1,5 +1,7 @@
 use can_contract::CommandData;
+use core::fmt::Write;
 use cyw43::{Control, JoinOptions, NetDriver};
+use embassy_executor::Spawner;
 use embassy_net::{Config, DhcpConfig, StackResources, tcp::TcpSocket};
 use embassy_rp::clocks::RoscRng;
 use embassy_time::{Duration, Timer};
@@ -13,6 +15,10 @@ use crate::{
     can::{CanReceiver, CanSender, get_value},
     settings::{PASSWORD, SSID},
 };
+#[embassy_executor::task]
+pub async fn net_task(mut runner: embassy_net::Runner<'static, cyw43::NetDriver<'static>>) -> ! {
+    runner.run().await
+}
 struct SocketIterator<R: Read, const N: usize> {
     pub f: R,
     pub buf: [u8; N],
@@ -42,9 +48,10 @@ impl<R: Read, const N: usize> SocketIterator<R, N> {
 }
 
 #[embassy_executor::task]
-async fn server(
+pub async fn server(
     mut control: Control<'static>,
     net_device: NetDriver<'static>,
+    spawner: Spawner,
     mut can_tx: CanSender,
     mut can_rx: CanReceiver,
     sensors: &'static SensorBitmap,
@@ -59,6 +66,7 @@ async fn server(
         RESOURCES.init(StackResources::new()),
         rng.next_u64(),
     );
+    spawner.spawn(net_task(runner)).unwrap();
 
     loop {
         if let Ok(()) = control
@@ -98,6 +106,41 @@ async fn server(
             offset: 0,
         };
         // get method and path
+        let mut method: String<16> = String::new();
+        while let Some(c) = iterator.next().await {
+            if c == ' ' {
+                break;
+            }
+            method.push(c);
+        }
+        let mut path: String<32> = String::new();
+        while let Some(c) = iterator.next().await {
+            if c == '\n' {
+                break;
+            }
+            method.push(c);
+        }
+
+        //TODO get data
+        match (method.as_str(), path.as_str()) {
+            ("GET", "/sensors") => return_sensors(&mut socket, sensors).await,
+        }
+    }
+
+    async fn return_sensors(socket: &mut TcpSocket<'_>, sensors: &SensorBitmap) {
+        let mut s: String<2048> =
+            String::try_from("HTTP/1.1 200 Allowed\n\n[").expect("from const");
+
+        sensors.lock(|sensors| {
+            sensors.borrow().into_iter().for_each(|index| {
+                let mut buf: String<5> = String::new();
+                write!(buf, "{},", index);
+                s.push_str(buf.as_str());
+            })
+        });
+        // remove last ","
+        s.pop();
+        s.push(']');
     }
     // get_value(
     //     &mut can_tx,
