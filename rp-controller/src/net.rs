@@ -2,12 +2,16 @@ use can_contract::CommandData;
 use core::fmt::Write;
 use cyw43::{Control, JoinOptions, NetDriver};
 use embassy_executor::Spawner;
-use embassy_net::{Config, DhcpConfig, StackResources, tcp::TcpSocket};
+use embassy_net::{
+    Config, DhcpConfig, StackResources,
+    tcp::{TcpSocket, TcpWriter},
+};
 use embassy_rp::clocks::RoscRng;
 use embassy_time::{Duration, Timer};
 use embedded_io_async::Read;
 use heapless::String;
 use log::{error, info};
+use serde::ser::SerializeStructVariant;
 use static_cell::StaticCell;
 
 use crate::{
@@ -32,7 +36,8 @@ impl<R: Read, const N: usize> SocketIterator<R, N> {
                 Ok(0) => None,
                 Ok(_count) => {
                     self.offset = 0;
-                    self.next().await
+                    self.offset += 1;
+                    Some(self.buf[self.offset - 1] as char)
                 }
                 Err(e) => {
                     error!("{:?}", e);
@@ -100,8 +105,9 @@ pub async fn server(
             log::error!("accept error{:?}", e);
             continue;
         }
+        let (reader, mut writer) = socket.split();
         let mut iterator = SocketIterator {
-            f: socket,
+            f: reader,
             buf,
             offset: 0,
         };
@@ -111,36 +117,53 @@ pub async fn server(
             if c == ' ' {
                 break;
             }
-            method.push(c);
+            let _ = method.push(c);
         }
         let mut path: String<32> = String::new();
         while let Some(c) = iterator.next().await {
             if c == '\n' {
                 break;
             }
-            method.push(c);
+            let _ = path.push(c);
         }
 
         //TODO get data
         match (method.as_str(), path.as_str()) {
-            ("GET", "/sensors") => return_sensors(&mut socket, sensors).await,
+            ("GET", "/sensors") => return_sensors(&mut writer, sensors).await,
+            ("GET", path) if path.starts_with("/sensor/") => todo!(),
+            ("POST", "/sensor") => todo!(),
+            _ => return_missing(&mut writer).await,
         }
     }
 
-    async fn return_sensors(socket: &mut TcpSocket<'_>, sensors: &SensorBitmap) {
+    async fn return_missing(writer: &mut TcpWriter<'_>) {
+        let s: String<1024> = String::try_from("HTTP/1.1 404 Not found\n\n").expect("from const");
+
+        if let Err(e) = writer.write(s.as_bytes()).await {
+            error!("failed at sending: {:?}", e);
+        }
+    }
+
+    async fn return_sensors(socket: &mut TcpWriter<'_>, sensors: &SensorBitmap) {
         let mut s: String<2048> =
             String::try_from("HTTP/1.1 200 Allowed\n\n[").expect("from const");
 
         sensors.lock(|sensors| {
             sensors.borrow().into_iter().for_each(|index| {
                 let mut buf: String<5> = String::new();
-                write!(buf, "{},", index);
-                s.push_str(buf.as_str());
+                let _ = write!(buf, "{},", index);
+                let _ = s.push_str(buf.as_str());
             })
         });
         // remove last ","
         s.pop();
-        s.push(']');
+        if let Err(_e) = s.push(']') {
+            error!("too many sensors");
+            return;
+        };
+        if let Err(e) = socket.write(s.as_bytes()).await {
+            error!("failed at sending: {:?}", e);
+        }
     }
     // get_value(
     //     &mut can_tx,
