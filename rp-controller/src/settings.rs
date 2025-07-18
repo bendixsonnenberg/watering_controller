@@ -3,8 +3,8 @@ use embedded_io::Read;
 use embedded_sdmmc::{BlockDevice, File, TimeSource};
 use heapless::String;
 use log::error;
-static SSID: OnceLock<String<64>> = OnceLock::new();
-static PASSWORD: OnceLock<String<64>> = OnceLock::new();
+pub static SSID: OnceLock<String<64>> = OnceLock::new();
+pub static PASSWORD: OnceLock<String<64>> = OnceLock::new();
 
 pub struct SensorSettings {
     threshold: u16,
@@ -12,10 +12,10 @@ pub struct SensorSettings {
     backoff_time: u16,
 }
 
-struct FileIterator<R: Read, const N: usize> {
-    f: R,
-    buf: [u8; N],
-    offset: usize,
+pub struct FileIterator<R: Read, const N: usize> {
+    pub f: R,
+    pub buf: [u8; N],
+    pub offset: usize,
 }
 
 impl<R: Read, const N: usize> FileIterator<R, N> {
@@ -23,7 +23,7 @@ impl<R: Read, const N: usize> FileIterator<R, N> {
         match self.buf.len() - self.offset {
             0 => match self.f.read(&mut self.buf) {
                 Ok(0) => None,
-                Ok(count) => {
+                Ok(_count) => {
                     self.offset = 0;
                     self.next()
                 }
@@ -70,4 +70,5 @@ pub async fn read_settings<
         let _ = s.push(c);
     }
     let _ = PASSWORD.init(s.clone());
+    //TODO: read sensor settings
 }

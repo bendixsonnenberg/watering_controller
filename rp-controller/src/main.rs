@@ -6,6 +6,7 @@
 #![no_main]
 mod can;
 mod menu_implementation;
+mod net;
 mod sd_card;
 mod settings;
 use core::cell::RefCell;
