@@ -41,10 +41,13 @@ Bendix has been documenting his progress in code here since day one. I joined Gi
 trying to document our progress and give a little context about what we do.
 I'll try to update regularly – who knows, this might one day attract public interest.  
 
+Small Addition: I startet building a webinterface, all while learning how to work with HTML and JavaScript. If you're interested, click [here](https://github.com/DoktorWussow/gewachshausomatwebinterface).
+
 -Philipp
 ## Milestones
 June '25: working menu on LCD-Display with individual IDs and live data, navigation possible through rotary encoder and "return"-button  
-June '25: data saved, showing 9 day continuous watering without crashes or similar issues; moisture level plausible
-July '25: Hardware for easier refilling added, also new water container
+June '25: data saved, showing 9 day continuous watering without crashes or similar issues; moisture level plausible  
+July '25: Hardware for easier refilling added, also new water container  
+July '25: Webinterface concept working, reference [here](https://github.com/DoktorWussow/gewachshausomatwebinterface).
 ## Status History
 Up to July '25: Two pot-sensors together with central controller, currently set up in greenhouse, with CAN-Network and watering function working as far as assessable. Menu working, displayed on LCD.
