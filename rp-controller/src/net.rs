@@ -11,7 +11,7 @@ use embassy_time::{Duration, Timer};
 use embedded_io_async::Read;
 use heapless::String;
 use log::{error, info};
-use serde::ser::SerializeStructVariant;
+use serde::{Deserialize, Serialize, ser::SerializeStructVariant};
 use static_cell::StaticCell;
 
 use crate::{
@@ -27,6 +27,15 @@ struct SocketIterator<R: Read, const N: usize> {
     pub f: R,
     pub buf: [u8; N],
     pub offset: usize,
+}
+#[derive(Serialize, Deserialize, Debug, Clone, Copy)]
+struct SendSensor {
+    threshold: u16,
+    watering_time: u16,
+    backoff_time: u16,
+    moisture: Option<u16>,
+    temperature: Option<i16>,
+    humidity: Option<u16>,
 }
 
 impl<R: Read, const N: usize> SocketIterator<R, N> {
@@ -130,9 +139,64 @@ pub async fn server(
         //TODO get data
         match (method.as_str(), path.as_str()) {
             ("GET", "/sensors") => return_sensors(&mut writer, sensors).await,
-            ("GET", path) if path.starts_with("/sensor/") => todo!(),
+            ("GET", path) if path.starts_with("/sensor/") => {
+                return_sensor(&mut writer, path, sensors, &mut can_tx, &mut can_rx).await
+            }
             ("POST", "/sensor") => todo!(),
             _ => return_missing(&mut writer).await,
+        }
+    }
+
+    //TODO refactor into 2 funcitons to use ? instead of this many if lets
+    async fn return_sensor(
+        mut writer: &mut TcpWriter<'_>,
+        path: &str,
+        sensors: &SensorBitmap,
+        mut can_tx: &mut CanSender,
+        mut can_rx: &mut CanReceiver,
+    ) {
+        // get id; check if id exist
+        if let Ok(id) = path["/sensor/".len()..].parse::<u8>()
+            && sensors.lock(|sensors| sensors.borrow().get(id as usize))
+        {
+            let settings = get_value(
+                &mut can_tx,
+                &mut can_rx,
+                CommandData::Settings(0, 0, 0),
+                id,
+                sensors,
+            )
+            .await;
+            let sensors = get_value(
+                &mut can_tx,
+                &mut can_rx,
+                CommandData::Sensors(None, None, None),
+                id,
+                sensors,
+            )
+            .await;
+            if let Some(CommandData::Settings(threshold, backoff_time, watering_time)) = settings
+                && let Some(CommandData::Sensors(moisture, temperature, humidity)) = sensors
+            {
+                let to_send = SendSensor {
+                    threshold,
+                    backoff_time,
+                    watering_time,
+                    moisture,
+                    temperature,
+                    humidity,
+                };
+                if let Ok(data) = serde_json_core::to_string::<SendSensor, 1024>(&to_send) {
+                    let _ = writer.write("HTTP/1.1 200 OK\n\n".as_bytes()).await;
+                    let _ = writer.write(data.as_bytes()).await;
+                } else {
+                    return_missing(&mut writer).await;
+                }
+            } else {
+                return_missing(&mut writer).await;
+            }
+        } else {
+            return_missing(&mut writer).await;
         }
     }
 
