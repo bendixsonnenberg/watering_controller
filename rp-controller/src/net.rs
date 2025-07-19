@@ -11,7 +11,7 @@ use embassy_time::{Duration, Timer};
 use embedded_io_async::Read;
 use heapless::String;
 use log::{error, info};
-use serde::{Deserialize, Serialize, ser::SerializeStructVariant};
+use serde::{Deserialize, Serialize};
 use static_cell::StaticCell;
 
 use crate::{
@@ -71,7 +71,7 @@ pub async fn server(
     sensors: &'static SensorBitmap,
 ) {
     let mut rng = RoscRng;
-    let mut dhcp_config = DhcpConfig::default();
+    let dhcp_config = DhcpConfig::default();
     let config = Config::dhcpv4(dhcp_config);
     static RESOURCES: StaticCell<StackResources<10>> = StaticCell::new();
     let (stack, runner) = embassy_net::new(

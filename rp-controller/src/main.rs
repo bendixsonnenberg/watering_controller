@@ -28,9 +28,7 @@ use embassy_rp::peripherals::{self, DMA_CH0, PIO0, PIO1, USB};
 use embassy_rp::pio::{InterruptHandler, Pio};
 use embassy_rp::usb::Driver;
 use embassy_sync::blocking_mutex::raw::ThreadModeRawMutex;
-use embassy_time::{Duration, Timer};
 use log::*;
-use net::net_task;
 use static_cell::StaticCell;
 use {defmt_rtt as _, panic_probe as _};
 
@@ -208,8 +206,6 @@ async fn main(spawner: Spawner) {
         can_receive_rx,
         sensors
     )));
-
-    let delay = Duration::from_millis(250);
 }
 
 // #[embassy_executor::task]

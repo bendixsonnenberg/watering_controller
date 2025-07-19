@@ -1,6 +1,6 @@
 use crate::can::{CanReceiver, get_value};
 use crate::settings::read_settings;
-use crate::{CanSender, SensorBitmap, SpiSdcard, settings};
+use crate::{CanSender, SensorBitmap, SpiSdcard};
 use can_contract::CommandData;
 use core::fmt::Write;
 use embassy_rp::gpio::{Level, Output};
@@ -51,27 +51,27 @@ pub async fn sd_card_log(
         let sdcard = SdCard::new(spi_dev, embassy_time::Delay);
         sdcard.mark_card_uninit();
 
-        let mut volume_mgr = VolumeManager::new(sdcard, DummyTimesource());
+        let volume_mgr = VolumeManager::new(sdcard, DummyTimesource());
 
-        let Ok(mut vol0) = volume_mgr.open_volume(VolumeIdx(0)) else {
+        let Ok(vol0) = volume_mgr.open_volume(VolumeIdx(0)) else {
             error!("Failed opening volume, not logging anymore, retrying");
             continue;
         };
         info!("got volume");
 
-        let Ok(mut root_dir) = vol0.open_root_dir() else {
+        let Ok(root_dir) = vol0.open_root_dir() else {
             error!("Failed opening dir");
             continue;
         };
         info!("got dir");
 
-        if let Ok(mut settings_file) =
+        if let Ok(settings_file) =
             root_dir.open_file_in_dir("settings", embedded_sdmmc::Mode::ReadOnly)
         {
             read_settings(settings_file).await;
         }
 
-        let Ok(mut log_file) = root_dir.open_file_in_dir(
+        let Ok(log_file) = root_dir.open_file_in_dir(
             "log_file.csv",
             embedded_sdmmc::Mode::ReadWriteCreateOrAppend,
         ) else {

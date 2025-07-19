@@ -46,7 +46,7 @@ pub async fn read_settings<
     const MFILE: usize,
     const MVOL: usize,
 >(
-    mut f: File<'_, BD, TS, MDIR, MFILE, MVOL>,
+    f: File<'_, BD, TS, MDIR, MFILE, MVOL>,
 ) -> () {
     // read WIFI Settings
     let mut iterator = FileIterator {
