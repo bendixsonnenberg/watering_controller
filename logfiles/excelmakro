@@ -1,0 +1,158 @@
+Sub SplitDataAndCreateTwoCharts()
+    Dim ws As Worksheet
+    Dim lastRow As Long
+    Dim lastCol As Long
+    Dim rawText As String
+    Dim parts() As String
+    Dim i As Long, j As Long
+    Dim writeCol As Long
+    Dim headerCol As Long
+    Dim blockCount As Long
+    Dim chartObj1 As ChartObject
+    Dim chartObj2 As ChartObject
+    Dim xRange As Range
+    Dim timeVal As String
+    
+    Set ws = ActiveSheet
+    
+    ' -------------------------
+    ' 1. Daten aufbereiten
+    ' -------------------------
+    
+    ' Letzte Zeile mit Daten in Spalte A
+    lastRow = ws.Cells(ws.Rows.Count, 1).End(xlUp).Row
+    
+    ' Überschrift für Time in Spalte B
+    ws.Cells(1, 2).Value = "Time"
+    
+    ' Kopfzeilen erzeugen anhand erster Datenzeile
+    rawText = ws.Cells(2, 1).Value
+    parts = Split(rawText, "Sen:")
+    blockCount = UBound(parts)
+    
+    headerCol = 3 ' Start in Spalte C
+    For i = 1 To blockCount
+        ws.Cells(1, headerCol).Value = "Thr" & i
+        ws.Cells(1, headerCol + 1).Value = "Mo" & i
+        ws.Cells(1, headerCol + 2).Value = "Temp" & i
+        ws.Cells(1, headerCol + 3).Value = "Hum" & i
+        headerCol = headerCol + 4
+    Next i
+    
+    ' Daten extrahieren
+    For j = 2 To lastRow
+        rawText = ws.Cells(j, 1).Value
+        
+        ' Time-Wert extrahieren
+        If InStr(rawText, "Time:") > 0 Then
+            timeVal = Trim(Split(Split(rawText, "Time:")(1), ",")(0))
+            ws.Cells(j, 2).Value = timeVal
+        End If
+        
+        ' Restliche Werte aufteilen
+        parts = Split(rawText, "Sen:")
+        
+        writeCol = 3 ' Start in Spalte C
+        
+        For i = 1 To UBound(parts)
+            Dim block As String
+            Dim thrVal As String, moVal As String, tempVal As String, humVal As String
+            
+            block = parts(i)
+            
+            ' Thr
+            If InStr(block, "Thr:") > 0 Then
+                thrVal = Trim(Split(Split(block, "Thr:")(1), ",")(0))
+            Else
+                thrVal = ""
+            End If
+            
+            ' Mo
+            If InStr(block, "Mo:") > 0 Then
+                moVal = Trim(Split(Split(block, "Mo:")(1), ",")(0))
+            Else
+                moVal = ""
+            End If
+            
+            ' Temp
+            If InStr(block, "Temp:") > 0 Then
+                tempVal = Trim(Split(Split(block, "Temp:")(1), ",")(0))
+            Else
+                tempVal = ""
+            End If
+            
+            ' Hum
+            If InStr(block, "Hum:") > 0 Then
+                humVal = Trim(Split(Split(block, "Hum:")(1), ",")(0))
+            Else
+                humVal = ""
+            End If
+            
+            ' Werte einfügen
+            ws.Cells(j, writeCol).Value = thrVal
+            ws.Cells(j, writeCol + 1).Value = moVal
+            ws.Cells(j, writeCol + 2).Value = tempVal
+            ws.Cells(j, writeCol + 3).Value = humVal
+            
+            writeCol = writeCol + 4
+        Next i
+    Next j
+    
+    ' -------------------------
+    ' 2. Diagramme erstellen
+    ' -------------------------
+    
+    ' Letzte gefüllte Zeile und Spalte finden
+    lastRow = ws.Cells(ws.Rows.Count, 3).End(xlUp).Row
+    lastCol = ws.Cells(1, ws.Columns.Count).End(xlToLeft).Column
+    
+    ' Alte Diagramme löschen
+    For Each chartObj1 In ws.ChartObjects
+        chartObj1.Delete
+    Next chartObj1
+    
+    ' X-Achse = Time-Spalte (Spalte B)
+    Set xRange = ws.Range(ws.Cells(2, 2), ws.Cells(lastRow, 2))
+    
+    ' -------------------------
+    ' Diagramm 1: Temp & Hum
+    ' -------------------------
+    Set chartObj1 = ws.ChartObjects.Add(Left:=400, Top:=50, Width:=600, Height:=300)
+    chartObj1.Chart.ChartType = xlLine
+    chartObj1.Chart.HasTitle = True
+    chartObj1.Chart.ChartTitle.Text = "Temperatur und Luftfeuchtigkeit"
+    
+    ' Serien für Temp/Hum hinzufügen
+    For i = 5 To lastCol Step 4 ' Temp-Spalten (C=3 Thr, D=4 Mo, E=5 Temp, F=6 Hum, also Temp = col 5, Hum = col 6)
+        chartObj1.Chart.SeriesCollection.NewSeries
+        chartObj1.Chart.SeriesCollection(chartObj1.Chart.SeriesCollection.Count).Name = ws.Cells(1, i).Value
+        chartObj1.Chart.SeriesCollection(chartObj1.Chart.SeriesCollection.Count).Values = ws.Range(ws.Cells(2, i), ws.Cells(lastRow, i))
+        chartObj1.Chart.SeriesCollection(chartObj1.Chart.SeriesCollection.Count).XValues = xRange
+        
+        chartObj1.Chart.SeriesCollection.NewSeries
+        chartObj1.Chart.SeriesCollection(chartObj1.Chart.SeriesCollection.Count).Name = ws.Cells(1, i + 1).Value
+        chartObj1.Chart.SeriesCollection(chartObj1.Chart.SeriesCollection.Count).Values = ws.Range(ws.Cells(2, i + 1), ws.Cells(lastRow, i + 1))
+        chartObj1.Chart.SeriesCollection(chartObj1.Chart.SeriesCollection.Count).XValues = xRange
+    Next i
+    
+    ' -------------------------
+    ' Diagramm 2: Thr & Mo
+    ' -------------------------
+    Set chartObj2 = ws.ChartObjects.Add(Left:=400, Top:=400, Width:=600, Height:=300)
+    chartObj2.Chart.ChartType = xlLine
+    chartObj2.Chart.HasTitle = True
+    chartObj2.Chart.ChartTitle.Text = "Thr und Mo"
+    
+    ' Serien für Thr/Mo hinzufügen
+    For i = 3 To lastCol Step 4 ' Thr-Spalten (Start in C=3)
+        chartObj2.Chart.SeriesCollection.NewSeries
+        chartObj2.Chart.SeriesCollection(chartObj2.Chart.SeriesCollection.Count).Name = ws.Cells(1, i).Value
+        chartObj2.Chart.SeriesCollection(chartObj2.Chart.SeriesCollection.Count).Values = ws.Range(ws.Cells(2, i), ws.Cells(lastRow, i))
+        chartObj2.Chart.SeriesCollection(chartObj2.Chart.SeriesCollection.Count).XValues = xRange
+        
+        chartObj2.Chart.SeriesCollection.NewSeries
+        chartObj2.Chart.SeriesCollection(chartObj2.Chart.SeriesCollection.Count).Name = ws.Cells(1, i + 1).Value
+        chartObj2.Chart.SeriesCollection(chartObj2.Chart.SeriesCollection.Count).Values = ws.Range(ws.Cells(2, i + 1), ws.Cells(lastRow, i + 1))
+        chartObj2.Chart.SeriesCollection(chartObj2.Chart.SeriesCollection.Count).XValues = xRange
+    Next i
+End Sub
