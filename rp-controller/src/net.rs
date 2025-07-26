@@ -60,6 +60,31 @@ impl<R: Read, const N: usize> SocketIterator<R, N> {
         }
     }
 }
+/// it is the iterator to read from, newline count has to be the number of consecutive \n pulled from the iterator immediatly before the
+async fn get_data_from_network<R: Read, const N: usize>(
+    mut it: SocketIterator<R, N>,
+    mut newline_count: usize,
+) -> Option<String<256>> {
+    // the data starts with two \n after another
+    loop {
+        let Some(c) = it.next().await else {
+            // in this case no data was found, we reached eof beforehand
+            return None;
+        };
+        match c {
+            '\n' => newline_count += 1,
+            _ => newline_count = 0,
+        }
+        if newline_count >= 2 {
+            // we are in the data block
+            let mut data = String::new();
+            while let Some(c) = it.next().await {
+                let _ = data.push(c);
+            }
+            return Some(data);
+        }
+    }
+}
 
 #[embassy_executor::task]
 pub async fn server(
@@ -137,6 +162,7 @@ pub async fn server(
         }
 
         //TODO get data
+        let data = get_data_from_network(iterator, 1).await;
         match (method.as_str(), path.as_str()) {
             ("GET", "/sensors") => return_sensors(&mut writer, sensors).await,
             ("GET", path) if path.starts_with("/sensor/") => {
