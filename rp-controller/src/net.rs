@@ -175,9 +175,7 @@ pub async fn server(
             ("GET", path) if path.starts_with("/sensor/") => {
                 return_sensor(&mut writer, path, sensors, &mut can_tx, &mut can_rx).await
             }
-            ("POST", "/sensor") => {
-                set_sensor(&mut writer, data, sensors, &mut can_tx, &mut can_rx).await
-            }
+            ("POST", "/sensor") => set_sensor(&mut writer, data, sensors, &mut can_tx).await,
             _ => return_missing(&mut writer).await,
         }
     }
@@ -187,13 +185,12 @@ pub async fn server(
         data: Option<String<256>>,
         sensors: &SensorBitmap,
         mut can_tx: &mut CanSender,
-        mut can_rx: &mut CanReceiver,
     ) {
         let Some(data) = data else {
             return_malformed(&mut writer).await;
             return;
         };
-        let Ok((sensor, size)) = serde_json_core::from_str::<PostSensor>(&data) else {
+        let Ok((sensor, _size)) = serde_json_core::from_str::<PostSensor>(&data) else {
             return_malformed(&mut writer).await;
             return;
         };
@@ -214,6 +211,7 @@ pub async fn server(
                 ),
             },
         );
+        return_ok(&mut writer).await;
     }
 
     //TODO refactor into 2 funcitons to use ? instead of this many if lets
