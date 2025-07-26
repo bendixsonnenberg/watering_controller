@@ -210,7 +210,7 @@ pub async fn get_value(
         .await
     else {
         // the sensor is not responding, remove it from the list of active sensors
-        report_error(crate::error::Error::SensorNotCommunicating(dev_id)).await;
+        report_error(crate::error::Error::SensorNotCommunicating(dev_id));
         sensors.lock(|sensor| sensor.borrow_mut().set(dev_id as usize, false));
         return None;
     };

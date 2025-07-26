@@ -1,4 +1,5 @@
 use crate::can::{CanReceiver, get_value};
+use crate::error::report_error;
 use crate::settings::read_settings;
 use crate::{CanSender, SensorBitmap, SpiSdcard};
 use can_contract::CommandData;
@@ -136,6 +137,9 @@ pub async fn sd_card_log(
                     // if the sensor has temp and humidity print them to sd card
                     if let Some(temp) = temp {
                         if let Some(hum) = humidity {
+                            if temp < 0 {
+                                report_error(crate::error::Error::SubFreezing(id));                                
+                            }
                             let _ = core::write!(&mut buffer, "Temp: {}, Hum: {},", temp, hum);
                         }
                     }

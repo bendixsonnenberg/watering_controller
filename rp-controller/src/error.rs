@@ -10,7 +10,7 @@ pub enum Error {
     SensorNotCommunicating(u8),
     MoistureLevelUnrealistic(u8),
     NoInternet,
-    SubFreezing,
+    SubFreezing(u8),
     SubFreezingTimeout,
     TempSensorFail,
 }
@@ -27,7 +27,7 @@ fn error_to_code(e: Error) -> u16 {
         SensorNotCommunicating(sensor_id) => 0x0100 | (sensor_id as u16),
         MoistureLevelUnrealistic(sensor_id) => 0x0200 | (sensor_id as u16),
         NoInternet => 0x404,
-        SubFreezing => 0x600,
+        SubFreezing(sensor_id) => 0x600 | (sensor_id as u16),
         SubFreezingTimeout => 0x601,
         TempSensorFail => 0x699,
         
@@ -35,7 +35,7 @@ fn error_to_code(e: Error) -> u16 {
 }
 
 /// adds error to the end of the stack
-pub async fn report_error(e: Error) {
+pub fn report_error(e: Error) {
     //TODO better error handeling
     if let Ok(mut errors) =  ERRORS.try_lock() {
         
