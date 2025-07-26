@@ -7,6 +7,7 @@
 mod can;
 mod menu_implementation;
 mod net;
+mod party;
 mod sd_card;
 mod settings;
 use core::cell::RefCell;

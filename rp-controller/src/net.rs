@@ -17,6 +17,7 @@ use static_cell::StaticCell;
 use crate::{
     SensorBitmap,
     can::{CanReceiver, CanSender, get_value, set_value},
+    party,
     settings::{PASSWORD, SSID},
 };
 #[embassy_executor::task]
@@ -176,6 +177,8 @@ pub async fn server(
                 return_sensor(&mut writer, path, sensors, &mut can_tx, &mut can_rx).await
             }
             ("POST", "/sensor") => set_sensor(&mut writer, data, sensors, &mut can_tx).await,
+            ("POST", "/party/on") => party::party(sensors, can_tx, true).await,
+            ("POST", "/party/off") => party::party(sensors, can_tx, false).await,
             _ => return_missing(&mut writer).await,
         }
     }
