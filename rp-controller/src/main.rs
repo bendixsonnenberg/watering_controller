@@ -30,6 +30,7 @@ use embassy_rp::peripherals::{self, DMA_CH0, PIO0, PIO1, USB};
 use embassy_rp::pio::{InterruptHandler, Pio};
 use embassy_rp::usb::Driver;
 use embassy_sync::blocking_mutex::raw::ThreadModeRawMutex;
+use error::report_error;
 use log::*;
 use static_cell::StaticCell;
 use {defmt_rtt as _, panic_probe as _};
@@ -208,6 +209,8 @@ async fn main(spawner: Spawner) {
         can_receive_rx,
         sensors
     )));
+
+    report_error(error::Error::Booted);
 }
 
 // #[embassy_executor::task]
