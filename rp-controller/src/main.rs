@@ -10,6 +10,7 @@ mod net;
 mod party;
 mod sd_card;
 mod settings;
+mod error;
 use core::cell::RefCell;
 use core::sync::atomic::AtomicU16;
 
