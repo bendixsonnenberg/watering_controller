@@ -37,7 +37,12 @@ fn error_to_code(e: Error) -> u16 {
 /// adds error to the end of the stack
 pub async fn report_error(e: Error) {
     //TODO better error handeling
-    let _ = ERRORS.lock().await.push(error_to_code(e));
+    if let Ok(mut errors) =  ERRORS.try_lock() {
+        
+        let _ = errors.push(error_to_code(e));
+    }
+
+
 }
 /// returns a clone of the error stack
 pub async fn get_errors() ->  Vec<u16, ERROR_STACK_SIZE>{
