@@ -1,4 +1,4 @@
-use can_contract::CommandData;
+use can_contract::{CommandData, CommandDataContainer};
 use core::fmt::Write;
 use cyw43::{Control, JoinOptions, NetDriver};
 use embassy_executor::Spawner;
@@ -16,7 +16,7 @@ use static_cell::StaticCell;
 
 use crate::{
     SensorBitmap,
-    can::{CanReceiver, CanSender, get_value},
+    can::{CanReceiver, CanSender, get_value, set_value},
     settings::{PASSWORD, SSID},
 };
 #[embassy_executor::task]
@@ -36,6 +36,13 @@ struct SendSensor {
     moisture: Option<u16>,
     temperature: Option<i16>,
     humidity: Option<u16>,
+}
+#[derive(Serialize, Deserialize, Debug, Clone, Copy)]
+struct PostSensor {
+    id: u8,
+    threshold: u16,
+    watering_time: u16,
+    backoff_time: u16,
 }
 
 impl<R: Read, const N: usize> SocketIterator<R, N> {
@@ -168,9 +175,45 @@ pub async fn server(
             ("GET", path) if path.starts_with("/sensor/") => {
                 return_sensor(&mut writer, path, sensors, &mut can_tx, &mut can_rx).await
             }
-            ("POST", "/sensor") => todo!(),
+            ("POST", "/sensor") => {
+                set_sensor(&mut writer, data, sensors, &mut can_tx, &mut can_rx).await
+            }
             _ => return_missing(&mut writer).await,
         }
+    }
+
+    async fn set_sensor(
+        mut writer: &mut TcpWriter<'_>,
+        data: Option<String<256>>,
+        sensors: &SensorBitmap,
+        mut can_tx: &mut CanSender,
+        mut can_rx: &mut CanReceiver,
+    ) {
+        let Some(data) = data else {
+            return_malformed(&mut writer).await;
+            return;
+        };
+        let Ok((sensor, size)) = serde_json_core::from_str::<PostSensor>(&data) else {
+            return_malformed(&mut writer).await;
+            return;
+        };
+        if !sensors.lock(|sensors| sensors.borrow().get(sensor.id as usize)) {
+            return_missing(&mut writer).await;
+            return;
+        }
+        // sensor that we want to set exists
+        set_value(
+            &mut can_tx,
+            CommandDataContainer::Data {
+                target_id: sensor.id,
+                src_id: 0,
+                data: CommandData::Settings(
+                    sensor.threshold,
+                    sensor.backoff_time,
+                    sensor.watering_time,
+                ),
+            },
+        );
     }
 
     //TODO refactor into 2 funcitons to use ? instead of this many if lets
@@ -234,6 +277,20 @@ pub async fn server(
         }
     }
 
+    async fn return_malformed(writer: &mut TcpWriter<'_>) {
+        let s: String<1024> = String::try_from("HTTP/1.1 400 Bad Request\n\n").expect("from const");
+
+        if let Err(e) = writer.write(s.as_bytes()).await {
+            error!("failed at sending: {:?}", e);
+        }
+    }
+    async fn return_ok(writer: &mut TcpWriter<'_>) {
+        let s: String<1024> = String::try_from("HTTP/1.1 200 OK\n\n").expect("from const");
+
+        if let Err(e) = writer.write(s.as_bytes()).await {
+            error!("failed at sending: {:?}", e);
+        }
+    }
     async fn return_sensors(socket: &mut TcpWriter<'_>, sensors: &SensorBitmap) {
         let mut s: String<2048> =
             String::try_from("HTTP/1.1 200 Allowed\n\n[").expect("from const");
