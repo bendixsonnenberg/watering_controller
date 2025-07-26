@@ -169,6 +169,7 @@ pub async fn server(
         //TODO get data
         let data = get_data_from_network(&mut socket, header_string).await;
         match (method.as_str(), path.as_str()) {
+            ("GET", "/static") => return_index(&mut socket).await,
             ("GET", "/sensors") => return_sensors(&mut socket, sensors).await,
             ("GET", path) if path.starts_with("/sensor/") => {
                 info!("getting single sensor");
@@ -197,6 +198,12 @@ pub async fn server(
         let _ = writer.write("HTTP/1.1 200 OK\n\n".as_bytes()).await;
         let _ = writer.write(error_string.as_bytes()).await;
         let _ = writer.write("\n\n".as_bytes()).await;
+    }
+    async fn return_index(mut writer: &mut TcpSocket<'_>) {
+        let main_page = include_bytes!("../index.html");
+        return_ok(&mut writer).await;
+
+        let _ = writer.write(main_page).await;
     }
 
     async fn set_sensor(
