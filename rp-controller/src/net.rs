@@ -15,11 +15,9 @@ use serde::{Deserialize, Serialize};
 use static_cell::StaticCell;
 
 use crate::{
-    SensorBitmap,
-    can::{CanReceiver, CanSender, get_value, set_value},
-    party,
-    settings::{PASSWORD, SSID},
+    can::{get_value, set_value, CanReceiver, CanSender}, error::get_errors, party, settings::{PASSWORD, SSID}, SensorBitmap
 };
+const MAX_ALLOCATED_SPACE_STRING: usize = 256;
 #[embassy_executor::task]
 pub async fn net_task(mut runner: embassy_net::Runner<'static, cyw43::NetDriver<'static>>) -> ! {
     runner.run().await
@@ -176,16 +174,26 @@ pub async fn server(
             ("GET", path) if path.starts_with("/sensor/") => {
                 return_sensor(&mut writer, path, sensors, &mut can_tx, &mut can_rx).await
             }
+            ("GET", "/errors") => return_errors(&mut writer).await,
             ("POST", "/sensor") => set_sensor(&mut writer, data, sensors, &mut can_tx).await,
             ("POST", "/party/on") => party::party(sensors, can_tx, true).await,
             ("POST", "/party/off") => party::party(sensors, can_tx, false).await,
             _ => return_missing(&mut writer).await,
         }
     }
+    async fn return_errors(writer: &mut TcpWriter<'_>) {
+        let errors = get_errors().await;
+        let Ok(error_string ):Result<serde_json_core::heapless::String<MAX_ALLOCATED_SPACE_STRING>, serde_json_core::ser::Error>= serde_json_core::to_string(&errors) else {
+            return
+        };
+        let _ = writer.write("HTTP/1.1 Ok 200\n\n".as_bytes()).await;
+        let _ = writer.write(error_string.as_bytes()).await;
+
+    }
 
     async fn set_sensor(
         mut writer: &mut TcpWriter<'_>,
-        data: Option<String<256>>,
+        data: Option<String<MAX_ALLOCATED_SPACE_STRING>>,
         sensors: &SensorBitmap,
         mut can_tx: &mut CanSender,
     ) {
@@ -271,7 +279,7 @@ pub async fn server(
     }
 
     async fn return_missing(writer: &mut TcpWriter<'_>) {
-        let s: String<1024> = String::try_from("HTTP/1.1 404 Not found\n\n").expect("from const");
+        let s: String<MAX_ALLOCATED_SPACE_STRING> = String::try_from("HTTP/1.1 404 Not found\n\n").expect("from const");
 
         if let Err(e) = writer.write(s.as_bytes()).await {
             error!("failed at sending: {:?}", e);
@@ -279,14 +287,14 @@ pub async fn server(
     }
 
     async fn return_malformed(writer: &mut TcpWriter<'_>) {
-        let s: String<1024> = String::try_from("HTTP/1.1 400 Bad Request\n\n").expect("from const");
+        let s: String<MAX_ALLOCATED_SPACE_STRING> = String::try_from("HTTP/1.1 400 Bad Request\n\n").expect("from const");
 
         if let Err(e) = writer.write(s.as_bytes()).await {
             error!("failed at sending: {:?}", e);
         }
     }
     async fn return_ok(writer: &mut TcpWriter<'_>) {
-        let s: String<1024> = String::try_from("HTTP/1.1 200 OK\n\n").expect("from const");
+        let s: String<MAX_ALLOCATED_SPACE_STRING> = String::try_from("HTTP/1.1 200 OK\n\n").expect("from const");
 
         if let Err(e) = writer.write(s.as_bytes()).await {
             error!("failed at sending: {:?}", e);
