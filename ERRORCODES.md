@@ -14,7 +14,6 @@ this is aspirational
 |02XX| moisture level unrealisitc| 
 |0404| no internet connection|
 |05YY| first bit 0 represents rec, first bit 1 tec(from can)|
-|0600| sub freezing temps mesured|
-|0601| sub freezing above certain time duration|
+|06XX| sub freezing temps mesured at that sensor|
 |0699| temp sensor failure|
 

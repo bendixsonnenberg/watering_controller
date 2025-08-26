@@ -1,4 +1,6 @@
 use crate::can::{CanReceiver, get_value};
+use crate::error::report_error;
+use crate::settings::read_settings;
 use crate::{CanSender, SensorBitmap, SpiSdcard};
 use can_contract::CommandData;
 use core::fmt::Write;
@@ -50,21 +52,30 @@ pub async fn sd_card_log(
         let sdcard = SdCard::new(spi_dev, embassy_time::Delay);
         sdcard.mark_card_uninit();
 
-        let mut volume_mgr = VolumeManager::new(sdcard, DummyTimesource());
+        let volume_mgr = VolumeManager::new(sdcard, DummyTimesource());
 
-        let Ok(mut vol0) = volume_mgr.open_volume(VolumeIdx(0)) else {
+        let Ok(vol0) = volume_mgr.open_volume(VolumeIdx(0)) else {
             error!("Failed opening volume, not logging anymore, retrying");
             continue;
         };
         info!("got volume");
 
-        let Ok(mut root_dir) = vol0.open_root_dir() else {
+        let Ok(root_dir) = vol0.open_root_dir() else {
             error!("Failed opening dir");
             continue;
         };
         info!("got dir");
 
-        let Ok(mut log_file) = root_dir.open_file_in_dir(
+        if let Ok(settings_file) =
+            root_dir.open_file_in_dir("settings", embedded_sdmmc::Mode::ReadOnly)
+        {
+            info!("read_file for settings");
+            read_settings(settings_file).await;
+        } else {
+            error!("failed to get settings file. Does it exists in the root dir?");
+        }
+
+        let Ok(log_file) = root_dir.open_file_in_dir(
             "log_file.csv",
             embedded_sdmmc::Mode::ReadWriteCreateOrAppend,
         ) else {
@@ -129,6 +140,9 @@ pub async fn sd_card_log(
                     // if the sensor has temp and humidity print them to sd card
                     if let Some(temp) = temp {
                         if let Some(hum) = humidity {
+                            if temp < 0 {
+                                report_error(crate::error::Error::SubFreezing(id));
+                            }
                             let _ = core::write!(&mut buffer, "Temp: {}, Hum: {},", temp, hum);
                         }
                     }

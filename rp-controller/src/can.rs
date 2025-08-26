@@ -1,3 +1,4 @@
+use crate::error::report_error;
 use crate::SHARED_SETTINGS;
 use crate::SensorBitmap;
 use crate::SpiCan;
@@ -209,7 +210,7 @@ pub async fn get_value(
         .await
     else {
         // the sensor is not responding, remove it from the list of active sensors
-        //TODO: add error reporting
+        report_error(crate::error::Error::SensorNotCommunicating(dev_id));
         sensors.lock(|sensor| sensor.borrow_mut().set(dev_id as usize, false));
         return None;
     };

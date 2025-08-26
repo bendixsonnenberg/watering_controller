@@ -9,7 +9,7 @@ use heapless::String;
 use lcd_lcm1602_i2c::async_lcd::Lcd;
 
 use crate::can::{CanReceiver, CanSender, get_value, set_value};
-use crate::{DisplayI2C, Irqs, MenuInput, SensorBitmap};
+use crate::{DisplayI2C, Irqs, MenuInput, SensorBitmap, party};
 use can_contract::{CommandData, CommandDataContainer};
 use core::fmt::Write;
 use embassy_rp::i2c;
@@ -107,33 +107,11 @@ impl SensorBuilder {
     }
 }
 impl menu::SensorBuilder for SensorBuilder {
-    async fn party(mut self) {
-        self.sensors.lock(|sensors| {
-            for sensor in sensors.borrow().into_iter() {
-                set_value(
-                    &mut self.can_tx,
-                    CommandDataContainer::Data {
-                        target_id: sensor as u8,
-                        src_id: 0,
-                        data: CommandData::LightRandom,
-                    },
-                );
-            }
-        })
+    async fn party(self) {
+        party::party(self.sensors, self.can_tx, true).await
     }
-    async fn unparty(mut self) {
-        self.sensors.lock(|sensors| {
-            for sensor in sensors.borrow().into_iter() {
-                set_value(
-                    &mut self.can_tx,
-                    CommandDataContainer::Data {
-                        target_id: sensor as u8,
-                        src_id: 0,
-                        data: CommandData::LightOff,
-                    },
-                );
-            }
-        })
+    async fn unparty(self) {
+        party::party(self.sensors, self.can_tx, false).await
     }
 }
 #[derive(Clone)]
