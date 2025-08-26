@@ -19,6 +19,7 @@ use log::*;
 const MOISTURE_INCREMENT_STEP_SIZE: u16 = 10;
 const BACKOFF_TIME_INCREMENT_STEP_SIZE: u16 = 1;
 const WATERING_TIME_INCREMENT_STEP_SIZE: u16 = 1;
+const DEBOUNCE_HOLD_TIME: u64 = 50;
 
 const FOCUS_COLOR: CommandData = CommandData::Light(0b11111, 0, 0);
 #[derive(Clone, Copy)]
@@ -376,11 +377,20 @@ pub async fn menu_handle(
         {
             select::Either3::First(_) => {
                 info!("back");
-                runner.input(menu::Input::Back).await;
+                // waiting to debounce button
+                Timer::after_millis(DEBOUNCE_HOLD_TIME).await;
+                if back_button.is_low() {
+                    runner.input(menu::Input::Back).await;
+                    back_button.wait_for_high().await;
+                }
             }
             select::Either3::Second(_) => {
                 info!("enter");
+                Timer::after_millis(DEBOUNCE_HOLD_TIME).await;
+                if enter_button.is_low() {
                 runner.input(menu::Input::Enter).await;
+                    enter_button.wait_for_high().await;
+                }
             }
             select::Either3::Third(Direction::Clockwise) => {
                 info!("left");
