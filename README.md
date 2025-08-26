@@ -29,7 +29,7 @@ The Specs for this Communication can be found [here](/can_protocol.md). The impl
 The moisture sensors get a threshold and use their valves to hold that threshold, currently through a simple comparision (potential PID).
 
 ## Current Status
-Three pot-sensors together with central controller, currently set up in greenhouse, with CAN-Network and watering function working fairly reliable. Menu working, displayed on LCD. RGB-LEDs added for easier identification while changing thresholds. Humidity/Temperaturesensor added. All data is logged on SD-Card.
+August '25: Web-functions added, central controller accesses WLAN. Sensorreadings possible through network with webinterface-prototype.
 
 ## Story and some Context
 After building a greenhouse on our little roof terrace for my fiancée, I stumbled upon the biggest problem in the private greenhouse industry. While tomatoes and cucumbers thrived, the biggest recurring problem was watering the plants, as you have to do so every day; on hot days, multiple times a day.
@@ -48,6 +48,8 @@ Small Addition: I startet building a webinterface, all while learning how to wor
 June '25: working menu on LCD-Display with individual IDs and live data, navigation possible through rotary encoder and "return"-button  
 June '25: data saved, showing 9 day continuous watering without crashes or similar issues; moisture level plausible  
 July '25: Hardware for easier refilling added, also new water container  
-July '25: Webinterface concept working, reference [here](https://github.com/DoktorWussow/gewachshausomatwebinterface).
+July '25: Webinterface concept working, reference [here](https://github.com/DoktorWussow/gewachshausomatwebinterface).  
+August '25: Access to live data possible through Webinterface concept.
 ## Status History
-Up to July '25: Two pot-sensors together with central controller, currently set up in greenhouse, with CAN-Network and watering function working as far as assessable. Menu working, displayed on LCD.
+Up to July '25: Two pot-sensors together with central controller, currently set up in greenhouse, with CAN-Network and watering function working as far as assessable. Menu working, displayed on LCD.  
+Up to August '25: Three pot-sensors together with central controller, currently set up in greenhouse, with CAN-Network and watering function working fairly reliable. Menu working, displayed on LCD. RGB-LEDs added for easier identification while changing thresholds. Humidity/Temperaturesensor added. All data is logged on SD-Card.
