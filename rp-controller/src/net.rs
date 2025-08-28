@@ -2,14 +2,9 @@ use can_contract::{CommandData, CommandDataContainer};
 use core::fmt::Write;
 use cyw43::{Control, JoinOptions, NetDriver};
 use embassy_executor::Spawner;
-use embassy_net::{
-    Config, DhcpConfig, StackResources,
-    tcp::{TcpSocket, TcpWriter},
-};
+use embassy_net::{Config, DhcpConfig, StackResources, tcp::TcpSocket};
 use embassy_rp::clocks::RoscRng;
 use embassy_time::{Duration, Timer};
-use embedded_io_async::Read;
-use embedded_io_async::Write as EmbeddedWrite;
 use heapless::{String, Vec};
 use log::{error, info};
 use serde::{Deserialize, Serialize};
@@ -22,15 +17,10 @@ use crate::{
     party,
     settings::{PASSWORD, SSID},
 };
-const MAX_ALLOCATED_SPACE_STRING: usize = 256;
+const MAX_ALLOCATED_SPACE_STRING: usize = 512;
 #[embassy_executor::task]
 pub async fn net_task(mut runner: embassy_net::Runner<'static, cyw43::NetDriver<'static>>) -> ! {
     runner.run().await
-}
-struct SocketIterator<R: Read, const N: usize> {
-    pub f: R,
-    pub buf: [u8; N],
-    pub offset: usize,
 }
 #[derive(Serialize, Deserialize, Debug, Clone, Copy)]
 struct SendSensor {
@@ -50,52 +40,45 @@ struct PostSensor {
     backoff_time: u16,
 }
 
-impl<R: Read, const N: usize> SocketIterator<R, N> {
-    async fn next(&mut self) -> Option<char> {
-        match self.buf.len() - self.offset {
-            0 => match self.f.read(&mut self.buf).await {
-                Ok(0) => None,
-                Ok(_count) => {
-                    self.offset = 0;
-                    self.offset += 1;
-                    Some(self.buf[self.offset - 1] as char)
-                }
-                Err(e) => {
-                    error!("{:?}", e);
-                    None
-                }
-            },
-            _ => {
-                self.offset += 1;
-                Some(self.buf[self.offset - 1] as char)
-            }
-        }
-    }
-}
-/// it is the iterator to read from, newline count has to be the number of consecutive \n pulled from the iterator immediatly before the
-async fn get_data_from_network<R: Read, const N: usize>(
-    mut it: SocketIterator<R, N>,
-    mut newline_count: usize,
-) -> Option<String<256>> {
+// / it is the iterator to read from, newline count has to be the number of consecutive \n pulled from the iterator immediatly before the
+async fn get_data_from_network<const N: usize>(
+    socket: &mut TcpSocket<'_>,
+    mut already_read: String<N>,
+) -> Option<String<N>> {
     // the data starts with two \n after another
+    let mut buf = [0; N];
+    let mut result = String::<N>::new();
+    let mut newline_count = 0;
+    let mut data_flag = false;
     loop {
-        let Some(c) = it.next().await else {
-            // in this case no data was found, we reached eof beforehand
-            return None;
-        };
-        match c {
-            '\n' => newline_count += 1,
-            _ => newline_count = 0,
-        }
-        if newline_count >= 2 {
-            // we are in the data block
-            let mut data = String::new();
-            while let Some(c) = it.next().await {
-                let _ = data.push(c);
+        if already_read.is_empty() {
+            if let Ok(0) = socket.read(&mut buf).await {
+                break;
             }
-            return Some(data);
+            let mut vec: Vec<u8, N> = Vec::new();
+            let _ = vec.extend_from_slice(&buf);
+            let parsed = String::from_utf8(vec);
+            if parsed.is_err() {
+                return None;
+            }
+            already_read = parsed.expect("Checked for err");
+        }
+        let c = already_read.remove(0);
+        if c == '\n' {
+            newline_count += 1;
+        } else {
+            newline_count = 0;
+        }
+
+        if newline_count >= 2 {
+            data_flag = true;
+        }
+
+        if data_flag {
+            let _ = result.push(c); // if this is an err the string was to short
         }
     }
+    Some(result)
 }
 
 #[embassy_executor::task]
@@ -151,17 +134,20 @@ pub async fn server(
             log::error!("accept error{:?}", e);
             continue;
         }
-        socket.read(&mut buf).await;
+        let Ok(_) = socket.read(&mut buf).await else {
+            continue;
+        };
 
-        let mut vec = Vec::from_slice(&buf).unwrap();
+        let vec = Vec::from_slice(&buf).unwrap();
         info!("got vec");
         Timer::after_millis(50).await;
-        let mut header_string: String<128> = String::from_utf8(vec).unwrap();
+        let mut header_string: String<MAX_ALLOCATED_SPACE_STRING> = String::from_utf8(vec).unwrap();
         info!("got header string: {}", header_string);
         Timer::after_millis(50).await;
         // get method and path
         let mut method: String<16> = String::new();
-        while let c = header_string.remove(0) {
+        loop {
+            let c = header_string.remove(0);
             info!("got method char: {}", c);
             Timer::after_millis(50).await;
             if c == ' ' {
@@ -171,7 +157,8 @@ pub async fn server(
         }
         info!("method is: {}", method);
         let mut path: String<32> = String::new();
-        while let c = header_string.remove(0) {
+        loop {
+            let c = header_string.remove(0);
             if c == ' ' {
                 break;
             }
@@ -180,7 +167,7 @@ pub async fn server(
         info!("path is: {}", path);
 
         //TODO get data
-        // let data = get_data_from_network(iterator, 1).await;
+        let data = get_data_from_network(&mut socket, header_string).await;
         match (method.as_str(), path.as_str()) {
             ("GET", "/sensors") => return_sensors(&mut socket, sensors).await,
             ("GET", path) if path.starts_with("/sensor/") => {
@@ -188,15 +175,15 @@ pub async fn server(
                 return_sensor(&mut socket, path, sensors, &mut can_tx, &mut can_rx).await
             }
             ("GET", "/errors") => return_errors(&mut socket).await,
-            // ("POST", "/sensor") => set_sensor(&mut writer, data, sensors, &mut can_tx).await,
+            ("POST", "/sensor") => set_sensor(&mut socket, data, sensors, &mut can_tx).await,
             ("POST", "/party/on") => party::party(sensors, can_tx, true).await,
             ("POST", "/party/off") => party::party(sensors, can_tx, false).await,
             _ => {
-                socket.write("HTTP/1.1 200 OK\n\n".as_bytes()).await;
+                let _ = socket.write("HTTP/1.1 404 MISSING\n\n".as_bytes()).await;
             }
         }
         socket.close();
-        socket.flush().await;
+        let _ = socket.flush().await;
         socket.abort();
     }
     async fn return_errors(writer: &mut TcpSocket<'_>) {
