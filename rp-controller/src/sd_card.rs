@@ -1,6 +1,6 @@
 use crate::can::{CanReceiver, get_value};
 use crate::error::report_error;
-use crate::settings::read_settings;
+use crate::settings::{read_sensor_settings, read_settings};
 use crate::{CanSender, SensorBitmap, SpiSdcard};
 use can_contract::CommandData;
 use core::fmt::Write;
@@ -73,6 +73,18 @@ pub async fn sd_card_log(
             read_settings(settings_file).await;
         } else {
             error!("failed to get settings file. Does it exists in the root dir?");
+        }
+
+        // reading settings for sensors and then discarding sending them to the sensors
+        if let Ok(sensor_settings_file) =
+            root_dir.open_file_in_dir("sensor_settings.json", embedded_sdmmc::Mode::ReadOnly)
+        {
+            info!("found sensor settings file");
+            read_sensor_settings(sensor_settings_file, &mut can_tx).await;
+        } else {
+            error!(
+                "failed to get settings file for sensors. Does sensor_settings.json exist in root dir?"
+            );
         }
 
         let Ok(log_file) = root_dir.open_file_in_dir(

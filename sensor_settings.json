@@ -1,0 +1,8 @@
+[
+  {
+    id: 1,
+    threshold: 2000,
+    backoff_time: 15,
+    watering_time: 35
+  }
+]
