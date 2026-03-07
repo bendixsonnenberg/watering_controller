@@ -31,7 +31,7 @@
             pkgs.gcc-arm-embedded
             pkgs.pkg-config
             pkgs.libusb1
-            pkgs.probe-rs
+            pkgs.probe-rs-tools
             pkgs.picotool
             # for displaying the plot
             pkgs.python314
