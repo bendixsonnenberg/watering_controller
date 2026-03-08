@@ -6,8 +6,15 @@
     fenix.url = "github:nix-community/fenix"; # Rust toolchain
 
   };
-  outputs = { self, nixpkgs, flake-utils, fenix }:
-    flake-utils.lib.eachDefaultSystem (system:
+  outputs =
+    {
+      self,
+      nixpkgs,
+      flake-utils,
+      fenix,
+    }:
+    flake-utils.lib.eachDefaultSystem (
+      system:
       let
         pkgs = import nixpkgs { inherit system; };
         rustToolchain = fenix.packages.${system}.stable.withComponents [
@@ -15,16 +22,19 @@
           "cargo"
           "clippy"
           "rustfmt"
+          "rust-analyzer"
           "rust-src"
           "llvm-tools-preview"
         ];
-        withTargets = with fenix.packages.${system};
+        withTargets =
+          with fenix.packages.${system};
           combine [
             rustToolchain
             targets.thumbv7m-none-eabi.stable.rust-std
             targets."thumbv8m.main-none-eabihf".stable.rust-std
           ];
-      in {
+      in
+      {
         devShells.default = pkgs.mkShell {
           buildInputs = [
             withTargets
@@ -39,5 +49,6 @@
           ];
 
         };
-      });
+      }
+    );
 }
